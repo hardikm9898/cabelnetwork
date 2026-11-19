@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+*.tsbuildinfo
+# Excel lock files
+~$*.xlsx
+
+# Real customer data (names, mobiles, addresses) must never be committed
+*.xlsx
+*.xls
+*.csv
+
+# Production secrets and local backups
+docker/prod.env
+docker/prod.env.*
+!docker/prod.env.example
+docker/backups/

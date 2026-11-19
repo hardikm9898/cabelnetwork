@@ -1,0 +1,20 @@
+name: cablenet-dev
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: cablenet
+      POSTGRES_PASSWORD: cablenet_dev
+      POSTGRES_DB: cablenet
+      TZ: UTC
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cablenet -d cablenet"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  pgdata:

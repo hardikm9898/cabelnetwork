@@ -1,0 +1,38 @@
+# SITE_ADDRESS: the public host name (e.g. cable.example.in) → automatic HTTPS (Let's Encrypt).
+# For a local test use SITE_ADDRESS=:80 (plain HTTP). No e-mail is needed for the certificate.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), camera=(), microphone=(), payment=()"
+		-Server
+	}
+
+	# API (also used by the agent app). Body limits are enforced by the API itself.
+	handle /api/* {
+		reverse_proxy api:3000 {
+			header_up X-Request-Id {http.request.header.X-Request-Id}
+		}
+	}
+
+	# Office website: static files, single-page app fallback.
+	handle {
+		root * /srv/admin
+		header Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		@html not path /assets/*
+		header @html Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

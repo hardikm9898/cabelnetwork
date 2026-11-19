@@ -1,0 +1,17 @@
+{
+  "name": "cablenet",
+  "private": true,
+  "packageManager": "pnpm@12.9.1",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/** run build && pnpm --filter @cablenet/api run build && pnpm --filter @cablenet/admin run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "db:up": "docker compose -f docker/compose.dev.yml up -d",
+    "db:down": "docker compose -f docker/compose.dev.yml down",
+    "e2e": "pnpm --filter ./packages/** run build && pnpm --filter @cablenet/admin run e2e && pnpm --filter @cablenet/agent run e2e",
+    "agent": "pnpm --filter @cablenet/agent start"
+  }
+}

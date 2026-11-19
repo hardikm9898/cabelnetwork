@@ -1,0 +1,45 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version from package.json "packageManager"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      # Integration tests start PostgreSQL 18 via Testcontainers (Docker is available on ubuntu runners).
+      - run: pnpm test
+      # Browser end-to-end tests: real PostgreSQL + API + built admin app.
+      - run: pnpm --filter @cablenet/admin exec playwright install --with-deps chromium
+      - run: pnpm --filter @cablenet/admin run e2e
+      # Agent app e2e: the Expo web build (react-native-web) against PostgreSQL + API, phone viewport.
+      - run: pnpm --filter @cablenet/agent run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results
+          path: |
+            apps/admin/test-results
+            apps/agent/test-results
+
+  # The production images must keep building (docker/compose.prod.yml).
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f docker/api.Dockerfile -t cablenet-api:ci .
+      - run: docker build -f docker/web.Dockerfile -t cablenet-web:ci .
+      - name: API refuses unsafe production settings
+        run: |
+          if docker run --rm -e NODE_ENV=production -e DATABASE_URL=postgres://x -e JWT_ACCESS_SECRET=change-me-to-a-long-random-secret-at-least-32-chars -e PUBLIC_BASE_URL=https://x.example cablenet-api:ci 2>&1 | grep -q "Unsafe production configuration"; then echo ok; else exit 1; fi

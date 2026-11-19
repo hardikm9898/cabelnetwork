@@ -1,0 +1,21 @@
+{
+  "name": "@cablenet/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared API request/response schemas (zod) and types for API, admin web and agent app.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"(no tests: schemas are exercised by API integration tests)\""
+  },
+  "dependencies": {
+    "@cablenet/domain": "workspace:*",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "^22.18.0"
+  }
+}

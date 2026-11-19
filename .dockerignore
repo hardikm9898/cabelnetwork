@@ -1,0 +1,16 @@
+**/node_modules
+**/dist
+**/dist-*
+**/.expo
+**/test-results
+**/playwright-report
+**/coverage
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+.git
+apps/agent
+docker/backups
+*.xlsx
+*.xls
+*.csv

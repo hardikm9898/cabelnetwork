@@ -1,0 +1,108 @@
+# Production stack on one server (SYSTEM_ARCHITECTURE §9):
+#   db (PostgreSQL 18) ← migrate (one-shot) ← api ← web (Caddy: HTTPS + office site + /api proxy)
+#   backup: nightly pg_dump with retention (copy /backups off the server, see RUNBOOK.md).
+#
+#   cp docker/prod.env.example docker/prod.env   # fill in the secrets
+#   docker compose -f docker/compose.prod.yml --env-file docker/prod.env up -d --build
+name: cablenet
+
+x-api-env: &api-env
+  NODE_ENV: production
+  PORT: "3000"
+  DATABASE_URL: postgres://cablenet:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/cablenet
+  DATABASE_POOL_MAX: "10"
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET}
+  RECEIPT_LINK_SECRET: ${RECEIPT_LINK_SECRET:?set RECEIPT_LINK_SECRET}
+  # One proxy in front (Caddy): the client IP is the last X-Forwarded-For entry.
+  TRUST_PROXY: "1"
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  JOBS_ENABLED: "true"
+  # Per user per minute. Keep the defaults in production; the load test raises them.
+  RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-300}
+  LOGIN_RATE_LIMIT_PER_MINUTE: ${LOGIN_RATE_LIMIT_PER_MINUTE:-10}
+  BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:-}
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cablenet
+      POSTGRES_USER: cablenet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      TZ: Asia/Kolkata
+    volumes:
+      - pgdata:/var/lib/postgresql
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cablenet -d cablenet"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # No published port: only the API and the backup job reach the database.
+
+  migrate:
+    image: cablenet-api:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    command: ["node", "apps/api/dist/src/cli.js", "migrate"]
+    environment: *api-env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: cablenet-api:${TAG:-latest}
+    restart: unless-stopped
+    environment: *api-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    image: cablenet-web:${TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/web.Dockerfile
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+  backup:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: db
+      PGUSER: cablenet
+      PGDATABASE: cablenet
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      BACKUP_DIR: /backups
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-35}
+      BACKUP_KEEP_MONTHS: ${BACKUP_KEEP_MONTHS:-12}
+      BACKUP_AT_UTC: ${BACKUP_AT_UTC:-20:45}
+      TZ: Asia/Kolkata
+    entrypoint: ["/bin/sh", "/scripts/backup-loop.sh"]
+    volumes:
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
+      - ./scripts:/scripts:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
