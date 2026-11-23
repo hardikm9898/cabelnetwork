@@ -15,7 +15,8 @@ import { KEYS, storage } from './storage';
 export const API_URL = (process.env.EXPO_PUBLIC_API_URL ?? (Platform.OS === 'android' ? 'http://10.0.2.2:3000' : '')).replace(/\/$/, '');
 
 // Release builds talk to the server only over HTTPS (customer data and cash entries; review I-7).
-if (!__DEV__ && process.env.NODE_ENV === 'production' && /^http:\/\/(?!localhost|127\.0\.0\.1)/.test(API_URL)) {
+// An internal-network build can opt in to plain http with EXPO_PUBLIC_ALLOW_HTTP=true.
+if (!__DEV__ && process.env.NODE_ENV === 'production' && process.env.EXPO_PUBLIC_ALLOW_HTTP !== 'true' && /^http:\/\/(?!localhost|127\.0\.0\.1)/.test(API_URL)) {
   throw new Error(`Release build points at an insecure API address (${API_URL}); set EXPO_PUBLIC_API_URL to https://…`);
 }
 
