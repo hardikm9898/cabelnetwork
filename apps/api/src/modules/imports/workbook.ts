@@ -90,10 +90,13 @@ function asText(v: unknown): { text: string; trimmed: boolean } {
   return { text: t, trimmed: t !== s };
 }
 
+/** "₹400.00", "Rs. 1,200", "400/-" → "400.00", "1200", "400" (amounts typed as text). */
+const moneyText = (s: string) => s.replace(/^\s*(₹|rs\.?|inr)\s*/i, '').replace(/\/-\s*$/, '').replace(/,(?=\d{2,3}\b)/g, '');
+
 /** Number cell → decimal string with 2 places; null when empty; 'invalid' when not a number. */
 function asMoney(v: unknown): string | null | 'invalid' {
   if (v === null || v === undefined || v === '') return null;
-  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? Number(v) : NaN;
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(moneyText(v)) ? Number(moneyText(v)) : NaN;
   if (!Number.isFinite(n)) return 'invalid';
   if (Math.round(n * 100) !== Math.round(n * 1000) / 10) return 'invalid'; // more than 2 decimals
   return fromPaise(BigInt(Math.round(n * 100)));
@@ -184,9 +187,9 @@ export async function parseWorkbook(buffer: Buffer): Promise<ParsedWorkbook> {
   const sheets = wb.worksheets.map((w) => w.name);
 
   // --- Customer master ---------------------------------------------------------------------
-  const listSheet = wb.worksheets.find((w) => /customer\s*list/i.test(w.name));
-  if (!listSheet) throw new Error('No "Customer List" sheet found');
-  const head = headerMap(listSheet, {
+  // The full business workbook has a "Customer List" sheet; a plain customer list (one sheet, the
+  // same columns, society as heading rows) is read from the first sheet with that header.
+  const listPatterns = {
     id: /customer\s*id/i,
     name: /customer\s*name|^name$/i,
     address: /address/i,
@@ -196,22 +199,38 @@ export async function parseWorkbook(buffer: Buffer): Promise<ParsedWorkbook> {
     mq: /^mq/i,
     notes: /^notes?$/i,
     society: /society/i,
-  });
+  };
+  const listSheet =
+    wb.worksheets.find((w) => /customer\s*list/i.test(w.name)) ??
+    wb.worksheets.find((w) => !MONTHS.includes(w.name.trim().toLowerCase() as (typeof MONTHS)[number]) && headerMap(w, listPatterns)?.cols.name !== undefined);
+  if (!listSheet) throw new Error('No "Customer List" sheet (or a sheet with "Customer ID" and "Customer Name" columns) found');
+  const head = headerMap(listSheet, listPatterns);
   if (!head || head.cols.name === undefined) throw new Error('The Customer List sheet has no "Customer ID" / "Customer Name" header');
+  // Without a Society column, the heading row above a group of customers names their society.
+  const societyFromHeadings = head.cols.society === undefined;
 
   const customers: ParsedCustomer[] = [];
   let headingRows = 0;
   let trimmedCells = 0;
+  let heading = '';
+  let notesDropped = 0;
   const get = (row: ExcelJS.Row, key: string) => (head.cols[key] === undefined ? null : valueOf(row.getCell(head.cols[key]!).value));
   for (let r = head.row + 1; r <= listSheet.rowCount; r++) {
     const row = listSheet.getRow(r);
     const fields = ['id', 'name', 'address', 'mobile', 'rate', 'stb', 'mq', 'notes', 'society'].map((k) => asText(get(row, k)));
     trimmedCells += fields.filter((f) => f.trimmed).length;
-    const [id, name, address, mobile, , stb, mq, notes, society] = fields.map((f) => f.text) as string[];
+    const [id, name, address, mobile, , stb, mq, rawNotes, typedSociety] = fields.map((f) => f.text) as string[];
     if (!id) {
-      if (fields.some((f) => f.text)) headingRows++; // society heading rows (D-7)
+      const text = fields.find((f) => f.text)?.text;
+      if (text) {
+        headingRows++; // society heading rows (D-7)
+        heading = text.replace(/[\s,.;:]+$/, '');
+      }
       continue;
     }
+    const society = societyFromHeadings ? heading : typedSociety!;
+    // A heading typed into a customer's Notes cell by mistake is not a note.
+    const notes = societyFromHeadings && rawNotes && rawNotes.replace(/[\s,.;:]+$/, '').toLowerCase() === society.toLowerCase() ? (notesDropped++, '') : rawNotes!;
     const rateCell = get(row, 'rate');
     const rateMoney = asMoney(rateCell);
     const rateRaw = asText(rateCell).text;
@@ -303,8 +322,13 @@ export async function parseWorkbook(buffer: Buffer): Promise<ParsedWorkbook> {
   if (stale) issues.push(issue('D-11', 'warning', `Sheet "${stale}" describes another workbook and is ignored`, { sheet: stale }));
   if (headingRows) issues.push(issue('D-7', 'warning', `${headingRows} society heading rows in the Customer List are not customers; skipped`, { sheet: listSheet.name }));
   if (trimmedCells) issues.push(issue('D-6', 'warning', `${trimmedCells} cells had extra spaces; trimmed (the workbook keeps the original)`, { sheet: listSheet.name }));
+  if (notesDropped) issues.push(issue('D-7', 'warning', `${notesDropped} Notes cells only repeat the society name; not kept as notes`, { sheet: listSheet.name }));
   const missing = MONTHS.map((_, i) => i + 1).filter((m) => !monthsFound.includes(m));
-  if (missing.length) issues.push(issue('V-MONTHS', 'warning', `Month sheets not found: ${missing.map((m) => MONTHS[m - 1]).join(', ')}`));
+  if (monthsFound.length === 0) {
+    issues.push(issue('V-MONTHS', 'warning', 'No month sheets: customer list only. Every customer starts with a zero balance (Option B); billing starts at the cutover month.'));
+  } else if (missing.length) {
+    issues.push(issue('V-MONTHS', 'warning', `Month sheets not found: ${missing.map((m) => MONTHS[m - 1]).join(', ')}`));
+  }
 
   return { historyYear, sheets, monthsFound, headingRows, trimmedCells, customers, months, issues };
 }

@@ -10,19 +10,30 @@
  *                                              account and signs out all its sessions
  *   verify-db                                 migrations, row counts and the financial invariants as JSON;
  *                                              exit code 1 if anything is wrong (used by the restore drill)
+ *   import-customers <file.xlsx | -> [--cutover YYYY-MM-01] [--by <mobile>] [--commit]
+ *                                              the office site's Excel import from the command line (same
+ *                                              checks, dry run and reconciliation). Without --commit it only
+ *                                              reports and saves nothing. "-" reads the workbook from stdin.
+ *                                              --by: the super admin recorded as importer (default: the first)
  */
 import 'reflect-metadata';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { parseArgs } from 'node:util';
 import { NestFactory } from '@nestjs/core';
-import { passwordPolicy } from '@cablenet/contracts';
+import { importDryRunRequest, passwordPolicy } from '@cablenet/contracts';
 import { normalizeIndianMobile } from '@cablenet/domain';
-import { createDatabase } from './db/database';
+import { createDatabase, DATABASE, Database } from './db/database';
 import { pendingMigrations, runMigrations } from './db/migrator';
 import { AppModule } from './app.module';
 import { loadConfig } from './config/env';
 import { hashPassword } from './modules/auth/passwords';
 import { JobsService } from './modules/finance/jobs.service';
 import { ReconciliationService } from './modules/finance/reconciliation.service';
+import { ImportsService } from './modules/imports/imports.service';
+import { requestContext } from './common/request-context';
+import type { AuthUser } from './common/request-context';
 import { sql } from 'kysely';
 
 async function main(): Promise<void> {
@@ -154,9 +165,99 @@ async function main(): Promise<void> {
       }
       return;
     }
+    case 'import-customers': {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { cutover: { type: 'string' }, by: { type: 'string' }, commit: { type: 'boolean', default: false } },
+      });
+      const file = positionals[0];
+      if (!file) throw new Error('Usage: import-customers <file.xlsx | -> [--cutover YYYY-MM-01] [--by <mobile>] [--commit]');
+      const buffer = file === '-' ? readFileSync(0) : readFileSync(file);
+      const cfg = { ...loadConfig(), JOBS_ENABLED: false, LOG_LEVEL: 'warn' as const };
+      const ctx = await NestFactory.createApplicationContext(AppModule.forRoot(cfg), { logger: ['error', 'warn'] });
+      try {
+        const db = ctx.get<Database>(DATABASE);
+        const by = values.by ? normalizeIndianMobile(values.by) : null;
+        if (values.by && !by?.valid) throw new Error('--by must be a 10-digit mobile number');
+        let q = db.selectFrom('users').select(['id', 'fullName', 'role']).where('role', '=', 'SUPER_ADMIN').where('status', '=', 'ACTIVE');
+        if (by) q = q.where('mobile', '=', by.normalized);
+        const admin = await q.orderBy('createdAt').executeTakeFirst();
+        if (!admin) throw new Error(by ? 'No active super admin with that mobile number' : 'No active super admin: run create-super-admin first');
+        const actor: AuthUser = { id: admin.id, role: admin.role, fullName: admin.fullName, sessionId: randomUUID(), deviceId: null, mustChangePassword: false };
+        const imports = ctx.get(ImportsService);
+        const name = file === '-' ? 'customers.xlsx' : basename(file);
+        const ok = await requestContext.run({ requestId: randomUUID(), ip: null, userAgent: 'cli import-customers', user: actor }, () =>
+          importFromCli(imports, { originalname: name, buffer, size: buffer.length }, values.cutover, values.commit === true, actor),
+        );
+        if (!ok) process.exitCode = 1;
+      } finally {
+        await ctx.close();
+      }
+      return;
+    }
     default:
-      throw new Error(`Unknown command "${command ?? ''}". Commands: migrate, create-super-admin, reset-password, run-jobs, verify-db`);
+      throw new Error(`Unknown command "${command ?? ''}". Commands: migrate, create-super-admin, reset-password, run-jobs, verify-db, import-customers`);
   }
+}
+
+/** Upload → checks → dry run (→ approve → commit), printing what the office site's Import page shows. */
+async function importFromCli(
+  imports: ImportsService,
+  file: { originalname: string; buffer: Buffer; size: number },
+  cutoverArg: string | undefined,
+  commit: boolean,
+  actor: AuthUser,
+): Promise<boolean> {
+  const rupees = (v: string) => `Rs ${Number(v).toLocaleString('en-IN')}`;
+  let b = await imports.upload(file, actor);
+  const s = b.summary;
+  const societies = new Map<string, number>();
+  for (const c of b.customers) societies.set(c.society, (societies.get(c.society) ?? 0) + 1);
+  console.log(`\nWorkbook ${file.originalname}: ${s.customers} customers in ${societies.size} societies`);
+  console.log(`  billed from cutover: ${s.billable} customers, ${rupees(s.monthlyTotal)} a month`);
+  console.log(`  rate to decide (text such as AMP / BOSS / DC, or blank): ${s.pendingDecision} customers, imported without billing`);
+  if (s.monthsFound.length) console.log(`  payment history: ${s.historyYear}, months ${s.monthsFound.join(', ')}, ${rupees(s.collections)} collected`);
+  console.log('\nSocieties:');
+  for (const [n, count] of [...societies].sort((x, y) => x[0].localeCompare(y[0]))) console.log(`  ${String(count).padStart(4)}  ${n}`);
+
+  const show = (severity: 'error' | 'warning') => {
+    const list = b.issues.filter((i) => i.severity === severity);
+    if (!list.length) return;
+    console.log(`\n${severity === 'error' ? 'ERRORS (must be fixed)' : 'Warnings'}: ${list.length}`);
+    for (const i of list) console.log(`  [${i.code}]${i.customerCode ? ` ${i.customerCode}` : ''}${i.row ? ` (row ${i.row})` : ''}: ${i.message}`);
+  };
+  show('error');
+  show('warning');
+
+  const cutover = cutoverArg ?? s.suggestedCutover;
+  if (!cutover) {
+    await imports.discard(b.id);
+    console.log('\nGive the cutover month: --cutover YYYY-MM-01 (the first month the new system bills)');
+    return false;
+  }
+  const req = importDryRunRequest.safeParse({ option: 'OPENING_BALANCE', cutoverDate: cutover });
+  if (!req.success) {
+    await imports.discard(b.id);
+    console.log(`\n--cutover ${cutover}: ${req.error.issues[0]?.message}`);
+    return false;
+  }
+  b = await imports.dryRun(b.id, req.data, actor);
+  const r = b.report!;
+  console.log(`\nDry run (Option B, opening balance; billing from ${cutover}): ${r.ok ? 'OK' : 'FAILED'}`);
+  for (const l of r.lines) console.log(`  ${l.ok ? 'ok ' : 'XX '} ${l.check}: workbook ${l.excel}, system ${l.system}`);
+  for (const i of r.blockingIssues) console.log(`  blocked by [${i.code}]${i.customerCode ? ` ${i.customerCode}` : ''}: ${i.message}`);
+  console.log(`  would create: ${Object.entries(r.created).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(', ') || 'nothing'}`);
+
+  if (!r.ok || !commit) {
+    await imports.discard(b.id);
+    console.log(r.ok ? '\nNothing was saved. Run the same command with --commit to import.' : '\nNothing was saved. Fix the errors above and run it again.');
+    return r.ok;
+  }
+  await imports.approve(b.id, b.dryRunHash!, actor);
+  b = await imports.commit(b.id, actor);
+  console.log(`\nIMPORTED (batch ${b.id}). It is listed in the office site under Import; customers with a rate to decide are under "Needs decision".`);
+  return true;
 }
 
 main().catch((err: unknown) => {

@@ -43,7 +43,17 @@ Phones and the office site reach only `https://<SITE_ADDRESS>`. Ports 80 and 443
    - **Settings:** business name, address and phone (printed on receipts), billing defaults.
    - **Agents:** one per agent, each with a temporary password.
    - **Areas & societies:** which agent owns which area (Q5).
-6. **Excel import** (super admin): follow EXCEL_MIGRATION_MAPPING §7 and the cutover plan in UAT_PLAN.md.
+6. **Excel import** (super admin): follow EXCEL_MIGRATION_MAPPING §7 and the cutover plan in UAT_PLAN.md. Use the office site's **Import** page, or the same import from the server's command line:
+
+   ```bash
+   # Report only (saves nothing). A plain customer list (no month sheets) is imported with zero
+   # balances and billed from --cutover (default: the 1st of next month).
+   $C exec -T api node apps/api/dist/src/cli.js import-customers - --cutover 2026-12-01 < customers.xlsx
+   # The same with --commit imports it (once; the same file is refused afterwards).
+   $C exec -T api node apps/api/dist/src/cli.js import-customers - --cutover 2026-12-01 --commit < customers.xlsx
+   ```
+
+   Back up first (§4.2). Delete the workbook from the server afterwards: it holds customer data.
 7. **Agent phones:**
    - Install the release build (`eas build --profile production`). `apps/agent/eas.json` must contain the real `https://` address; release builds refuse plain `http`.
    - Each agent signs in, replaces the temporary password and sets a PIN.

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import ExcelJS from 'exceljs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAgent, createCustomer, createHarness, createSociety, Harness } from './support/harness';
 import { expectBooksBalance, runBilling, today } from './support/finance';
@@ -22,6 +23,7 @@ interface Batch {
 }
 
 const REAL_WORKBOOK = join(__dirname, '../../../DOC-20261117-WA0003.xlsx');
+const PLAIN_WORKBOOK = join(__dirname, '../../../originaldata.xlsx');
 const YEAR = new Date().getUTCFullYear() - 1; // a complete past year, so the suite never goes stale
 const CUTOVER = `${YEAR + 1}-01-01`;
 
@@ -309,6 +311,55 @@ describe('Excel import', () => {
       expect(line(b, 'outstanding')).toMatchObject({ excel: '0.00', system: '0.00' });
       expect(b.report!.perCustomer).toMatchObject({ equal: 163, total: 163 });
       if (option === 'FULL_HISTORY') expect(b.report!.created).toMatchObject({ invoices: 1562, payments: 1562 });
+    });
+  });
+
+  // A plain customer list: one sheet, no Society column (society heading rows instead), rates typed
+  // as "₹400.00" text, no month sheets.
+  describe('a plain customer list (no Society column, no month sheets)', () => {
+    const plainList = async () => {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Sheet1');
+      ws.addRow(['Customer ID', 'Customer Name', 'Address', 'Mobile', 'Monthly Rate', 'STB No', 'MQ No', 'Notes']);
+      ws.addRow([null, null, 'PLAIN NAGAR SOC', null, null, null, null, 'PLAIN NAGAR SOC']);
+      ws.addRow([910001, 'FIRST PLAIN', '1, PLAIN NAGAR', 9811100001, '₹400.00', '307070260709100001']);
+      ws.addRow([910002, 'SECOND PLAIN', '2, PLAIN NAGAR', 9811100002, 'AMP', '307070260709100002']);
+      ws.addRow([null, null, 'LAKE VIEW, ', null, null, null, null, 'LAKE VIEW, ']);
+      ws.addRow([910003, 'THIRD PLAIN', 'A-1 LAKE VIEW', 9811100003, '₹1,250.50', '307070260709100003', null, 'LAKE VIEW']);
+      ws.addRow([910004, 'FOURTH PLAIN', 'A-2 LAKE VIEW', 9811100004, null, '307070260709100004']);
+      return Buffer.from(await wb.xlsx.writeBuffer());
+    };
+
+    it('reads societies from the heading rows and ₹ text rates; billing starts at the cutover with zero balances', async () => {
+      const b = await upload(await plainList(), 'originaldata.xlsx');
+      expect(b.summary, JSON.stringify(b.issues.filter((i) => i.severity === 'error'))).toMatchObject({ customers: 4, billable: 2, monthlyTotal: '1650.50', pendingDecision: 2, errors: 0 });
+      expect(b.summary.suggestedCutover).toMatch(/^\d{4}-\d{2}-01$/);
+      expect(b.customers.map((c) => [c.code, c.rate])).toEqual([['910001', '400.00'], ['910002', null], ['910003', '1250.50'], ['910004', null]]);
+      expect((b.customers as unknown as { society: string }[]).map((c) => c.society)).toEqual(['PLAIN NAGAR SOC', 'PLAIN NAGAR SOC', 'LAKE VIEW', 'LAKE VIEW']);
+
+      // Option A needs payment history.
+      const a = await dryRun(b.id, 'FULL_HISTORY', b.summary.suggestedCutover!);
+      expect(a.report!.blockingIssues.map((i) => i.code)).toContain('V-OPTION');
+
+      const ok = await dryRun(b.id, 'OPENING_BALANCE', b.summary.suggestedCutover!);
+      expect(ok.report!.ok, JSON.stringify(ok.report)).toBe(true);
+      expect(ok.report!.created).toMatchObject({ customers: 4, societies: 2, subscriptions: 2, pendingDecision: 2, openingBalances: 0, payments: 0 });
+      await approveAndCommit(ok);
+      const third = await h.db.selectFrom('customers').select(['notes', 'pendingDecision']).where('customerCode', '=', '910003').executeTakeFirstOrThrow();
+      expect(third).toEqual({ notes: null, pendingDecision: null }); // the repeated society name is not a note
+      expect(await balanceOf('910001')).toMatchObject({ outstanding: '0.00', advance: '0.00' });
+      await expectBooksBalance(h);
+    });
+  });
+
+  describe.runIf(existsSync(PLAIN_WORKBOOK))('the real customer list (originaldata.xlsx)', () => {
+    it('163 customers in 12 societies, 142 billed at ₹52,330 a month, 21 to decide; the dry run reconciles', async () => {
+      const b = await upload(readFileSync(PLAIN_WORKBOOK), 'originaldata.xlsx');
+      expect(b.summary).toMatchObject({ customers: 163, billable: 142, monthlyTotal: '52330.00', pendingDecision: 21, errors: 0 });
+      expect(new Set((b.customers as unknown as { society: string }[]).map((c) => c.society)).size).toBe(12);
+      const r = await dryRun(b.id, 'OPENING_BALANCE', b.summary.suggestedCutover!);
+      expect(r.report!.ok, JSON.stringify(r.report)).toBe(true);
+      expect(r.report!.created).toMatchObject({ customers: 163, societies: 12, subscriptions: 142, pendingDecision: 21 });
     });
   });
 });

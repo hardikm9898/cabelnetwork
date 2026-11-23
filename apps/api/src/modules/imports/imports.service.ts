@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { sql } from 'kysely';
 import type { CorrectableField, ImportCorrectionRequest, ImportDryRunRequest, ImportIssue, ImportOptionName, ImportReport, ReconciliationLine } from '@cablenet/contracts';
-import { addDays, addMonths, fromPaise, Paise, periodLabel, toPaise } from '@cablenet/domain';
+import { addDays, addMonths, businessDateOf, fromPaise, Paise, periodLabel, toPaise } from '@cablenet/domain';
 import { DATABASE, Database } from '../../db/database';
 import { conflict, notFound, unprocessable } from '../../common/errors';
 import { Page } from '../../common/http';
@@ -146,7 +146,13 @@ export class ImportsService {
         historyYear: p.historyYear,
         monthsFound: p.monthsFound,
         lastMonthWithPayments: lastMonth,
-        suggestedCutover: lastMonth ? (lastMonth === 12 ? first(p.historyYear + 1, 1) : first(p.historyYear, lastMonth + 1)) : null,
+        suggestedCutover: lastMonth
+          ? lastMonth === 12
+            ? first(p.historyYear + 1, 1)
+            : first(p.historyYear, lastMonth + 1)
+          : p.monthsFound.length === 0
+            ? addMonths(`${businessDateOf(new Date()).slice(0, 7)}-01`, 1) // customer list only: next month
+            : null,
         customers: eff.length,
         billable: billable.length,
         monthlyTotal: fromPaise(sum(billable.map((c) => toPaise(c.futureRate!)))),
@@ -501,13 +507,18 @@ export class ImportsService {
     // Months before cutover are history; the new system bills from cutover.
     const historyMonths = p.monthsFound.filter((m) => first(year, m) < cutover);
     const yearEnd = first(year + 1, 1);
-    if (cutover > yearEnd) {
+    // A plain customer list has no history: any cutover month works, balances start at zero.
+    const customersOnly = p.monthsFound.length === 0;
+    if (customersOnly && option === 'FULL_HISTORY') {
+      issues.push({ code: 'V-OPTION', severity: 'error', customerCode: null, sheet: null, row: null, message: 'This workbook has no month sheets (no payment history): choose Option B (opening balance)' });
+    }
+    if (!customersOnly && cutover > yearEnd) {
       issues.push({ code: 'V-CUTOVER', severity: 'error', customerCode: null, sheet: null, row: null, message: `The workbook covers ${year} only; choose a cutover on or before ${yearEnd}` });
     }
-    if (cutover <= first(year, 1)) {
+    if (!customersOnly && cutover <= first(year, 1)) {
       issues.push({ code: 'V-CUTOVER', severity: 'error', customerCode: null, sheet: null, row: null, message: `Cutover must be after the start of the workbook (${first(year, 1)})` });
     }
-    const missingHistory = MONTHS.map((_, i) => i + 1).filter((m) => first(year, m) < cutover && !p.monthsFound.includes(m));
+    const missingHistory = customersOnly ? [] : MONTHS.map((_, i) => i + 1).filter((m) => first(year, m) < cutover && !p.monthsFound.includes(m));
     if (missingHistory.length) {
       issues.push({ code: 'V-MONTHS', severity: 'error', customerCode: null, sheet: null, row: null, message: `Month sheets needed before cutover are missing: ${missingHistory.map((m) => MONTHS[m - 1]).join(', ')}` });
     }
