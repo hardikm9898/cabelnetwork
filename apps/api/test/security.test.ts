@@ -35,6 +35,13 @@ describe('security hardening', () => {
       expect(() => loadConfig({ ...prod, PUBLIC_BASE_URL: 'http://cable.example.in', JWT_ACCESS_SECRET: strong, RECEIPT_LINK_SECRET: strong.split('').reverse().join('') })).toThrow(/https/);
       expect(loadConfig({ ...prod, JWT_ACCESS_SECRET: strong, RECEIPT_LINK_SECRET: strong.split('').reverse().join(''), TRUST_PROXY: '1' })).toMatchObject({ TRUST_PROXY: 1, SWAGGER_ENABLED: false });
     });
+    it('plain HTTP on an internal address needs the explicit opt-in', () => {
+      const secrets = { JWT_ACCESS_SECRET: strong, RECEIPT_LINK_SECRET: strong.split('').reverse().join('') };
+      const internal = { ...prod, ...secrets, PUBLIC_BASE_URL: 'http://10.50.0.201:6600' };
+      expect(() => loadConfig(internal)).toThrow(/ALLOW_INSECURE_HTTP/);
+      expect(loadConfig({ ...internal, ALLOW_INSECURE_HTTP: 'true' })).toMatchObject({ ALLOW_INSECURE_HTTP: true, PUBLIC_BASE_URL: 'http://10.50.0.201:6600' });
+    });
+
     it('does not trust every proxy hop, and NODE_ENV must be stated', () => {
       expect(() => loadConfig({ NODE_ENV: 'test', DATABASE_URL: 'x', JWT_ACCESS_SECRET: strong, TRUST_PROXY: 'true' })).toThrow(/proxy hops/);
       expect(() => loadConfig({ DATABASE_URL: 'x', JWT_ACCESS_SECRET: strong })).toThrow(/NODE_ENV/);

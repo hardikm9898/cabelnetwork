@@ -46,6 +46,11 @@ const envSchema = z.object({
     }),
   /** Public origin used in shareable links (e.g. https://cable.example.in). Defaults to the request host. */
   PUBLIC_BASE_URL: z.url().optional(),
+  /**
+   * Explicit opt-in to run production over plain HTTP (e.g. a trial on an internal IP without a
+   * domain). Passwords and customer data then travel unencrypted on that network: internal use only.
+   */
+  ALLOW_INSECURE_HTTP: bool.default(false),
   SWAGGER_ENABLED: bool.optional(),
   /** Run the in-process scheduler (billing, reminders, reconciliation). Disable on extra replicas if desired. */
   JOBS_ENABLED: bool.default(true),
@@ -71,7 +76,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     if (weak(cfg.JWT_ACCESS_SECRET)) problems.push('JWT_ACCESS_SECRET looks like a placeholder; generate one with "openssl rand -hex 32"');
     if (!cfg.RECEIPT_LINK_SECRET || weak(cfg.RECEIPT_LINK_SECRET)) problems.push('RECEIPT_LINK_SECRET must be set to its own random value');
     if (cfg.RECEIPT_LINK_SECRET && cfg.RECEIPT_LINK_SECRET === cfg.JWT_ACCESS_SECRET) problems.push('RECEIPT_LINK_SECRET must differ from JWT_ACCESS_SECRET');
-    if (!cfg.PUBLIC_BASE_URL?.startsWith('https://') && !cfg.PUBLIC_BASE_URL?.startsWith('http://localhost')) problems.push('PUBLIC_BASE_URL must be the public https:// address');
+    if (!cfg.PUBLIC_BASE_URL) problems.push('PUBLIC_BASE_URL must be set to the address users open');
+    else if (!cfg.PUBLIC_BASE_URL.startsWith('https://') && !cfg.PUBLIC_BASE_URL.startsWith('http://localhost')) {
+      if (cfg.ALLOW_INSECURE_HTTP) {
+        console.warn(`WARNING: running over plain HTTP (${cfg.PUBLIC_BASE_URL}). Passwords and customer data are not encrypted; use only on a trusted internal network.`);
+      } else {
+        problems.push('PUBLIC_BASE_URL must be the public https:// address (or set ALLOW_INSECURE_HTTP=true for an internal-network trial)');
+      }
+    }
     if (problems.length) throw new Error(`Unsafe production configuration:\n  ${problems.join('\n  ')}`);
   }
   return { ...cfg, SWAGGER_ENABLED: cfg.SWAGGER_ENABLED ?? cfg.NODE_ENV !== 'production' };

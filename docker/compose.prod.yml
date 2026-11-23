@@ -17,6 +17,7 @@ x-api-env: &api-env
   TRUST_PROXY: "1"
   CORS_ORIGINS: ${CORS_ORIGINS:-}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
+  ALLOW_INSECURE_HTTP: ${ALLOW_INSECURE_HTTP:-false}
   LOG_LEVEL: ${LOG_LEVEL:-info}
   JOBS_ENABLED: "true"
   # Per user per minute. Keep the defaults in production; the load test raises them.
