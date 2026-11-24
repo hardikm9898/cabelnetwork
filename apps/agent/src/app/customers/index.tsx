@@ -25,9 +25,10 @@ function StatusBadge({ item }: { item: ListItem }) {
   }
 }
 
-function ItemCard({ item }: { item: ListItem }) {
+function ItemCard({ item, showBoxes }: { item: ListItem; showBoxes: boolean }) {
   const { t } = useApp();
   const owes = item.outstanding !== '0.00';
+  const boxes = [...item.stbNumbers.map((b) => `STB ${b}`), ...item.mqNumbers.map((m) => `MQ ${m}`)].join(' · ');
   return (
     <Card onPress={() => router.push({ pathname: '/customers/[id]', params: { id: item.id } })} accessibilityLabel={`${item.name}, ${item.customerCode}`}>
       <Row>
@@ -46,7 +47,13 @@ function ItemCard({ item }: { item: ListItem }) {
       <T muted size={13} numberOfLines={1}>
         {item.addressLine}
         {item.mobile ? ` · ${item.mobile}` : ''}
+        {item.monthlyRate || item.upcomingRate ? ` · ₹${Number(item.monthlyRate ?? item.upcomingRate!.monthlyRate)}${t('perMonth')}` : ''}
       </T>
+      {showBoxes && boxes !== '' && (
+        <T size={13} numberOfLines={1} style={{ color: C.info }}>
+          {boxes}
+        </T>
+      )}
       {item.unsentAmount && (
         <Row>
           <T size={13} style={{ color: C.warning }}>
@@ -105,8 +112,16 @@ export default function WorklistScreen() {
           placeholderTextColor="#94a3b8"
           value={q}
           onChangeText={setQ}
-          style={{ minHeight: 48, borderWidth: 1, borderColor: C.line, borderRadius: 12, paddingHorizontal: 14, fontSize: 16, color: C.ink }}
+          style={{ minHeight: 48, borderWidth: 1, borderColor: q ? C.brand : C.line, borderRadius: 12, paddingHorizontal: 14, fontSize: 16, color: C.ink }}
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+          returnKeyType="search"
         />
+        {q.trim() !== '' && (
+          <T muted size={13}>
+            {items.length} · {t('filterAll')}: {c.all}
+          </T>
+        )}
         <Chips<Filter>
           testIDPrefix="filter"
           value={filter}
@@ -139,7 +154,7 @@ export default function WorklistScreen() {
         <FlatList
           data={items}
           keyExtractor={(i) => i.id}
-          renderItem={({ item }) => <ItemCard item={item} />}
+          renderItem={({ item }) => <ItemCard item={item} showBoxes={q.trim() !== ''} />}
           contentContainerStyle={{ padding: 12, gap: 10 }}
           refreshControl={<RefreshControl refreshing={status.running} onRefresh={() => void engine.sync()} />}
           ListEmptyComponent={<T muted style={{ textAlign: 'center', padding: 24 }}>{header ? t('nothingHere') : t('needsDownload')}</T>}

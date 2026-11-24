@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { businessDate, optionalTrimmed, paginationQuery, uuid } from './common';
 import { VISIT_OUTCOMES } from './fieldops';
+import type { MonthBill } from '@cablenet/domain';
 import { PAYMENT_MODES, positiveMoney } from './finance';
 
 /**
@@ -11,7 +12,7 @@ import { PAYMENT_MODES, positiveMoney } from './finance';
  * at most once and returns the same outcome for every replay.
  */
 
-export const SYNC_OP_TYPES = ['PAYMENT_CREATE', 'VISIT_CREATE', 'FOLLOWUP_DONE'] as const;
+export const SYNC_OP_TYPES = ['PAYMENT_CREATE', 'VISIT_CREATE', 'FOLLOWUP_DONE', 'PAYMENT_CANCEL'] as const;
 export type SyncOpType = (typeof SYNC_OP_TYPES)[number];
 
 /** Reference shown to the customer before the final receipt exists: P-{AGENTCODE}-{seq}. */
@@ -51,10 +52,27 @@ export type VisitOpPayload = z.infer<typeof visitOpPayload>;
 export const followUpDoneOpPayload = z.object({ followUpId: uuid, note: optionalTrimmed(500) });
 export type FollowUpDoneOpPayload = z.infer<typeof followUpDoneOpPayload>;
 
+/**
+ * The agent deletes a payment entered by mistake (wrong customer, wrong amount, entered twice).
+ * Nothing is erased: the server reverses it (or, if not yet verified, marks it failed) with the
+ * reason, cancels the receipt and raises an alert so the office sees it. Names the payment by the
+ * id of the phone entry that created it (works before that entry is sent) or by the server id.
+ */
+export const paymentCancelOpPayload = z
+  .object({
+    customerId: uuid,
+    paymentOpId: uuid.nullish(),
+    paymentId: uuid.nullish(),
+    reason: z.string().trim().min(3, 'Give a reason').max(300),
+  })
+  .refine((v) => !!v.paymentOpId || !!v.paymentId, { message: 'Which payment?', path: ['paymentId'] });
+export type PaymentCancelOpPayload = z.infer<typeof paymentCancelOpPayload>;
+
 export const SYNC_PAYLOADS = {
   PAYMENT_CREATE: paymentOpPayload,
   VISIT_CREATE: visitOpPayload,
   FOLLOWUP_DONE: followUpDoneOpPayload,
+  PAYMENT_CANCEL: paymentCancelOpPayload,
 } as const;
 
 export const syncOp = z.object({
@@ -124,7 +142,13 @@ export interface FollowUpDoneOpResult {
   followUpId: string;
   alreadyClosed: boolean;
 }
-export type SyncOpResultData = PaymentOpResult | VisitOpResult | FollowUpDoneOpResult;
+export interface PaymentCancelOpResult {
+  paymentId: string | null;
+  /** REVERSED / FAILED: done now or earlier. NOT_CREATED: the payment entry itself was rejected. */
+  status: 'REVERSED' | 'FAILED' | 'NOT_CREATED';
+  alreadyDone: boolean;
+}
+export type SyncOpResultData = PaymentOpResult | VisitOpResult | FollowUpDoneOpResult | PaymentCancelOpResult;
 
 export interface SyncOpOutcome {
   opId: string;
@@ -150,14 +174,21 @@ export interface SyncCustomer {
   customerCode: string;
   name: string;
   mobile: string | null;
+  altMobile: string | null;
   addressLine: string;
   landmark: string | null;
   society: string;
+  notes: string | null;
+  /** Active set-top boxes and their MQ numbers (searchable on the phone). */
+  stbNumbers: string[];
+  mqNumbers: string[];
   status: string;
   assignment: 'PRIMARY' | 'TEMPORARY';
   /** End of a temporary cover; the phone hides the customer after this time even offline. */
   temporaryUntil: string | null;
   monthlyRate: string | null;
+  /** A charge that starts later (changed for the next bill, or an imported customer's first rate). */
+  upcomingRate: { monthlyRate: string; from: string } | null;
   outstanding: string;
   advance: string;
   oldestDueDate: string | null;
@@ -170,8 +201,26 @@ export interface SyncCustomer {
   paidToday: string;
   lastVisitAt: string | null;
   lastVisitOutcome: string | null;
-  recentPayments: { id: string; amount: string; paymentDate: string; mode: string; status: string; receiptNumber: string | null; collectedByName: string | null }[];
+  recentPayments: SyncPayment[];
+  /** Monthly bills of the last 13 months, for the month-by-month calendar. */
+  bills: MonthBill[];
   recentVisits: { id: string; visitedAt: string; outcome: string; notes: string | null; agentName: string }[];
+}
+
+export interface SyncPayment {
+  id: string;
+  amount: string;
+  paymentDate: string;
+  mode: string;
+  status: string;
+  receiptNumber: string | null;
+  collectedByName: string | null;
+  /** The phone entry that created it (PAYMENT_CREATE op id), when it came from a phone. */
+  clientTxnId: string | null;
+  /** This agent collected it and it is not handed over yet: the agent may delete it. */
+  canDelete: boolean;
+  /** Why it was reversed or failed (e.g. "Deleted by agent: wrong customer"). */
+  note: string | null;
 }
 
 export interface SyncFollowUp {

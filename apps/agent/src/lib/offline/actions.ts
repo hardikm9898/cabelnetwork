@@ -1,4 +1,4 @@
-import type { PaymentOpPayload, SyncCustomer, VisitOpPayload } from '@cablenet/contracts';
+import type { PaymentCancelOpPayload, PaymentOpPayload, SyncCustomer, VisitOpPayload } from '@cablenet/contracts';
 import type { LocalStore, OutboxOp } from './store';
 
 export interface Actor {
@@ -91,6 +91,34 @@ export async function completeFollowUp(
       attempts: 0,
       flags: [],
       label: args.customer ? label(args.customer) : {},
+    },
+  ]);
+  return op!;
+}
+
+/**
+ * Deletes a payment entered by mistake. Saved on the phone like any entry and sent in order, so it
+ * also works for a payment that has not been sent yet; the office sees the deletion and the reason.
+ */
+export async function cancelPayment(
+  store: LocalStore,
+  actor: Actor,
+  args: { customer: SyncCustomer; paymentOpId: string | null; paymentId: string | null; amount: string; reason: string; offline: boolean; now: Date; newId: () => string },
+): Promise<OutboxOp> {
+  const payload: PaymentCancelOpPayload = { customerId: args.customer.id, paymentOpId: args.paymentOpId, paymentId: args.paymentId, reason: args.reason };
+  const [op] = await store.add((next) => [
+    {
+      opId: args.newId(),
+      seq: next.seq(),
+      type: 'PAYMENT_CANCEL',
+      createdAt: args.now.toISOString(),
+      offline: args.offline,
+      payload: payload as unknown as Record<string, unknown>,
+      userId: actor.userId,
+      state: 'PENDING',
+      attempts: 0,
+      flags: [],
+      label: { ...label(args.customer), amount: args.amount },
     },
   ]);
   return op!;

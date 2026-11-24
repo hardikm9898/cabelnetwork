@@ -50,6 +50,8 @@ function Navigator() {
         <Stack.Screen name="customers/[id]" options={{ title: '' }} />
         <Stack.Screen name="collect/[id]" options={{ title: t('collectPayment') }} />
         <Stack.Screen name="visit/[id]" options={{ title: t('recordVisit') }} />
+        <Stack.Screen name="edit-customer/[id]" options={{ title: t('editCustomer') }} />
+        <Stack.Screen name="delete-payment" options={{ title: t('deletePayment') }} />
         <Stack.Screen name="receipt/[id]" options={{ title: t('receipt'), headerBackVisible: false }} />
         <Stack.Screen name="followups" options={{ title: t('followUps') }} />
         <Stack.Screen name="collections" options={{ title: t('myCollections') }} />

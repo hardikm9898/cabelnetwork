@@ -9,7 +9,7 @@ import type {
 import { businessDateOf, canReadAllCustomers, cleanText, normalizeIndianMobile } from '@cablenet/domain';
 import { DATABASE, Database } from '../../db/database';
 import type { CustomerStatusDb } from '../../db/schema';
-import { conflict, notFound, unprocessable } from '../../common/errors';
+import { conflict, forbidden, notFound, unprocessable } from '../../common/errors';
 import { Page } from '../../common/http';
 import type { AuthUser } from '../../common/request-context';
 import { AuditService } from '../core/audit.service';
@@ -305,8 +305,13 @@ export class CustomersService {
 
   async update(id: string, input: UpdateCustomerRequest, actor: AuthUser) {
     return this.db.transaction().execute(async (trx) => {
+      await this.access.assertCanAccess(actor, id, trx);
       const before = await trx.selectFrom('customers').selectAll().where('id', '=', id).forUpdate().executeTakeFirst();
       if (!before) throw notFound('CUSTOMER_NOT_FOUND', 'Customer not found');
+      if (actor.role === 'AGENT' && input.societyId !== undefined && input.societyId !== before.societyId) {
+        // A new society can mean a different agent; the office decides that.
+        throw forbidden('SOCIETY_CHANGE_BY_OFFICE', 'Moving a customer to another society is done by the office');
+      }
 
       const patch: Record<string, unknown> = {};
       const warnings: CustomerWarning[] = [];
@@ -426,7 +431,7 @@ export class CustomersService {
     } else {
       await trx
         .insertInto('customerConnections')
-        .values({ customerId: id, stbNumber: stb, mqNumber: mq, activeFrom: today, reason: 'Added by the office', createdBy: actor.id })
+        .values({ customerId: id, stbNumber: stb, mqNumber: mq, activeFrom: today, reason: actor.role === 'AGENT' ? 'Added by the agent' : 'Added by the office', createdBy: actor.id })
         .execute();
     }
     return { before, after: { stbNumber: stb, mqNumber: stb ? mq : null } };

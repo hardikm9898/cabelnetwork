@@ -26,7 +26,7 @@ function monthStart(offset: number) {
 async function signIn(page: Page, mobile = state.adminMobile, password = state.adminPassword) {
   await page.goto('/login');
   await page.getByLabel('Mobile number').fill(mobile);
-  await page.getByLabel('Password').fill(password);
+  await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Sign in' }).click();
 }
 
@@ -195,9 +195,49 @@ test.describe.serial('admin web', () => {
     await row.getByRole('button', { name: 'Mark checked' }).click();
     await page.getByRole('dialog', { name: 'Mark as checked' }).getByLabel('Note (what you checked or did)').fill('Agent phone date fixed');
     await page.getByRole('dialog', { name: 'Mark as checked' }).getByRole('button', { name: 'Save' }).click();
-    await expect(page.getByText('Nothing to check')).toBeVisible();
+    await expect(page.getByText('Nothing to check').filter({ visible: true }).first()).toBeVisible();
     expect(await sqlValue(`SELECT review_note AS v FROM sync_operations WHERE customer_id = '${customer.id}'`)).toBe('Agent phone date fixed');
   });
+  test('a payment the agent deleted on the phone shows as "deleted by agent" with the reason; the month calendar shows the dues', async ({ page }) => {
+    const post = (path: string, body: unknown, token?: string) =>
+      fetch(`${state.apiBase}/api/v1${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+    const login = (await (await post('/auth/login', { mobile: state.agentMobile, password: state.agentPassword })).json()) as { data: { accessToken: string } };
+    const token = login.data.accessToken;
+    const pull = (await (await fetch(`${state.apiBase}/api/v1/sync/pull`, { headers: { authorization: `Bearer ${token}` } })).json()) as {
+      data: { customers: { id: string; name: string; outstanding: string }[]; nextProvisionalSeq: number; agent: { code: string } };
+    };
+    const customer = pull.data.customers.find((c) => c.outstanding !== '0.00')!;
+    const payOp = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const res = await post(
+      '/sync/push',
+      {
+        deviceTime: now,
+        ops: [
+          { opId: payOp, type: 'PAYMENT_CREATE', seq: 1, createdAt: now, offline: false, payload: { customerId: customer.id, amount: '123', mode: 'CASH', provisionalRef: `P-${pull.data.agent.code}-${String(pull.data.nextProvisionalSeq + 5).padStart(6, '0')}` } },
+          { opId: crypto.randomUUID(), type: 'PAYMENT_CANCEL', seq: 2, createdAt: now, offline: false, payload: { customerId: customer.id, paymentOpId: payOp, reason: 'Wrong customer' } },
+        ],
+      },
+      token,
+    );
+    const results = ((await res.json()) as { data: { results: { status: string }[] } }).data.results;
+    expect(results.map((r) => r.status)).toEqual(['APPLIED', 'APPLIED']);
+
+    await signIn(page);
+    await expect(page.getByTestId('kpis')).toBeVisible();
+    await page.goto(`/customers/${customer.id}`);
+    const calendar = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Month by month' }) });
+    await expect(calendar).toBeVisible();
+    await expect(calendar.getByText(/Not paid|Part paid/).first()).toBeVisible();
+    await page.screenshot({ path: 'test-results/office-calendar.png', fullPage: true });
+    await page.getByRole('tab', { name: 'Payments' }).click();
+    const row = page.getByRole('row').filter({ hasText: '₹123.00' });
+    await expect(row.getByText('deleted by agent')).toBeVisible();
+    await expect(row.getByText('Wrong customer')).toBeVisible();
+    await page.goto('/alerts');
+    await expect(page.getByText(/deleted the ₹123\.00 cash payment/).filter({ visible: true }).first()).toBeVisible();
+  });
+
   test('Excel import: check, correct, dry run, approve, import, then see the Excel history', async ({ page }) => {
     const year = new Date().getUTCFullYear() - 1;
     const c = (code: string, rate: number | string) => ({ code, name: `Import ${code}`, address: `${code} Import Nagar`, mobile: Number(`97${code}00`), rate, stb: `XLSTB${code}`, society: 'IMPORT NAGAR' });
@@ -210,8 +250,8 @@ test.describe.serial('admin web', () => {
     await nav(page, 'Excel import');
     await page.getByLabel('Excel workbook (.xlsx)').setInputFiles({ name: 'customers.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: workbook });
     await page.getByRole('button', { name: 'Upload and check' }).click();
-    await expect(page.getByText('Checked — run a dry run')).toBeVisible();
-    await expect(page.getByText('Needs decision (AMP)')).toBeVisible();
+    await expect(page.getByText('Checked — run a dry run').filter({ visible: true }).first()).toBeVisible();
+    await expect(page.getByText('Needs decision (AMP)').filter({ visible: true }).first()).toBeVisible();
 
     // The office decides the AMP customer's plan during the import.
     await page.getByRole('row').filter({ hasText: '910003' }).getByRole('button', { name: 'Correct' }).click();
@@ -222,13 +262,13 @@ test.describe.serial('admin web', () => {
     await page.getByLabel(/Option B/).check();
     await page.getByLabel('Cutover month (the new system bills from the 1st)').fill(`${year + 1}-01`);
     await page.getByRole('button', { name: 'Run dry run' }).click();
-    await expect(page.getByText('Dry run reconciles — waiting for approval')).toBeVisible();
+    await expect(page.getByText('Dry run reconciles — waiting for approval').filter({ visible: true }).first()).toBeVisible();
     await expect(page.getByRole('row').filter({ hasText: 'Per-customer balance at cutover' }).getByText('Yes')).toBeVisible();
     expect(await sqlValue(`SELECT count(*)::text AS v FROM customers WHERE customer_code LIKE '9100%'`)).toBe('0'); // dry run saved nothing
 
     await page.getByLabel('I have checked this report against the workbook.').check();
     await page.getByRole('button', { name: 'Approve this result' }).click();
-    await expect(page.getByText('Approved — ready to import')).toBeVisible();
+    await expect(page.getByText('Approved — ready to import').filter({ visible: true }).first()).toBeVisible();
     await page.getByRole('button', { name: 'Import now' }).click();
     await page.getByRole('dialog', { name: 'Import into the live system?' }).getByRole('button', { name: 'Import' }).click();
     await expect(page.getByText('Imported', { exact: true }).first()).toBeVisible();

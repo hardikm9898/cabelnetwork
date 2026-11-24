@@ -1,10 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { sql } from 'kysely';
 import { businessDateOf, fromPaise, toPaise } from '@cablenet/domain';
 import { DATABASE, Database } from '../../db/database';
 import { Page } from '../../common/http';
 import type { AuthUser } from '../../common/request-context';
 import { CustomerAccessService } from '../customers/customer-access.service';
 import { LedgerService } from './ledger.service';
+import { monthBills } from './month-bills';
 
 /** Read models over the ledger for one customer (statement, balance card, payment history). */
 @Injectable()
@@ -91,12 +93,48 @@ export class LedgerQueriesService {
     return { summary: await this.ledger.summary(this.db, customerId), entries };
   }
 
+  /** Bills month by month (paid / part paid / due) for the payment calendar. */
+  async months(customerId: string, user: AuthUser) {
+    await this.access.assertCanAccess(user, customerId);
+    const [bills, opening] = await Promise.all([
+      monthBills(this.db, [customerId], null),
+      this.db
+        .selectFrom('invoices')
+        .select(['total', 'amountPaid'])
+        .where('customerId', '=', customerId)
+        .where('kind', '=', 'OPENING_BALANCE')
+        .where('status', '!=', 'CANCELLED')
+        .executeTakeFirst(),
+    ]);
+    return {
+      today: businessDateOf(new Date()),
+      bills: bills.get(customerId) ?? [],
+      openingBalance: opening ? { total: fromPaise(toPaise(opening.total)), paid: fromPaise(toPaise(opening.amountPaid)) } : null,
+    };
+  }
+
   async payments(customerId: string, user: AuthUser, page: number, pageSize: number) {
     await this.access.assertCanAccess(user, customerId);
-    const q = this.db.selectFrom('payments as p').leftJoin('users as u', 'u.id', 'p.collectedBy').where('p.customerId', '=', customerId);
+    const q = this.db
+      .selectFrom('payments as p')
+      .leftJoin('users as u', 'u.id', 'p.collectedBy')
+      .leftJoin('paymentReversals as pr', 'pr.paymentId', 'p.id')
+      .where('p.customerId', '=', customerId);
     const [items, total] = await Promise.all([
       q
-        .select(['p.id', 'p.amount', 'p.paymentDate', 'p.mode', 'p.reference', 'p.status', 'p.source', 'u.fullName as collectedByName', 'p.createdAt'])
+        .select([
+          'p.id',
+          'p.amount',
+          'p.paymentDate',
+          'p.mode',
+          'p.reference',
+          'p.status',
+          'p.source',
+          'u.fullName as collectedByName',
+          'p.createdAt',
+          sql<string | null>`coalesce(pr.reason, CASE WHEN p.status = 'FAILED' THEN p.verification_note END)`.as('correctionNote'),
+          sql<boolean>`EXISTS (SELECT 1 FROM users x WHERE x.role = 'AGENT' AND x.id = coalesce(pr.approved_by, CASE WHEN p.status = 'FAILED' THEN p.verified_by END))`.as('deletedByAgent'),
+        ])
         .orderBy('p.paymentDate', 'desc')
         .orderBy('p.createdAt', 'desc')
         .limit(pageSize)

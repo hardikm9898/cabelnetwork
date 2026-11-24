@@ -6,6 +6,7 @@ import { api, apiPage, download } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { date, dateTime, inr, label, today } from '../lib/format';
 import { ActionDialog } from '../components/ActionDialog';
+import { MonthCalendar } from '../components/MonthCalendar';
 import { AgentSelect, MoneyInput, ReasonDialog, SocietySelect } from '../components/shared';
 import { DELETE_REASONS } from './Customers';
 import {
@@ -281,6 +282,7 @@ export default function CustomerDetailPage() {
 
       {tab === 'overview' && (
         <div className="grid gap-4 lg:grid-cols-2">
+          <MonthCalendar customerId={id} />
           <Card title="Details">
             <DescriptionList
               items={[
@@ -599,6 +601,18 @@ interface PaymentRow {
   status: string;
   source: string;
   collectedByName: string | null;
+  correctionNote: string | null;
+  deletedByAgent: boolean;
+}
+
+/** Status of a payment, with "Deleted by agent" and the reason for a reversed / failed one. */
+export function PaymentStatus({ status, deletedByAgent, note }: { status: string; deletedByAgent?: boolean; note?: string | null }) {
+  return (
+    <span className="flex flex-col items-start gap-0.5">
+      {deletedByAgent ? <Badge tone="bad">deleted by agent</Badge> : <StatusBadge status={status} />}
+      {note && <span className="max-w-64 text-xs text-muted">{note.replace(/^Deleted by agent: /, '')}</span>}
+    </span>
+  );
 }
 
 export async function openReceipt(paymentId: string) {
@@ -625,7 +639,7 @@ function PaymentsTab({ customerId, onChanged }: { customerId: string; onChanged:
           { key: 'amt', header: 'Amount', align: 'right', cell: (r) => inr(r.amount) },
           { key: 'mode', header: 'Mode', cell: (r) => `${label(r.mode)}${r.reference ? ` · ${r.reference}` : ''}` },
           { key: 'by', header: 'Collected by', cell: (r) => `${r.collectedByName ?? '—'} (${label(r.source)})` },
-          { key: 'st', header: 'Status', cell: (r) => <StatusBadge status={r.status} /> },
+          { key: 'st', header: 'Status', cell: (r) => <PaymentStatus status={r.status} deletedByAgent={r.deletedByAgent} note={r.correctionNote} /> },
           {
             key: 'act',
             header: '',

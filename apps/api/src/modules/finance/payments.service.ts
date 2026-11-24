@@ -221,25 +221,27 @@ export class PaymentsService {
   }
 
   async fail(id: string, reason: string, actor: AuthUser) {
-    return this.db.transaction().execute(async (trx) => {
-      const p = await this.lockPayment(trx, id);
-      if (p.status !== 'PENDING_VERIFICATION') throw conflict('PAYMENT_NOT_PENDING', `Payment is ${p.status}`);
-      await trx
-        .updateTable('payments')
-        .set({ status: 'FAILED', verifiedBy: actor.id, verifiedAt: sql<Date>`now()`, verificationNote: reason })
-        .where('id', '=', id)
-        .execute();
-      await this.audit.record(trx, { action: 'payment.failed', entityType: 'payment', entityId: id, before: { status: p.status }, after: { status: 'FAILED' }, reason });
-      if (p.collectedBy && p.collectedBy !== actor.id) {
-        await this.notifications.notify(trx, [p.collectedBy], {
-          type: 'PAYMENT_FAILED',
-          title: 'Payment could not be verified',
-          body: `₹${p.amount} (${p.mode}) was rejected: ${reason}`,
-          data: { paymentId: id },
-        });
-      }
-      return this.detail(trx, id);
-    });
+    return this.db.transaction().execute((trx) => this.failIn(trx, id, reason, actor));
+  }
+
+  async failIn(trx: Database, id: string, reason: string, actor: AuthUser) {
+    const p = await this.lockPayment(trx, id);
+    if (p.status !== 'PENDING_VERIFICATION') throw conflict('PAYMENT_NOT_PENDING', `Payment is ${p.status}`);
+    await trx
+      .updateTable('payments')
+      .set({ status: 'FAILED', verifiedBy: actor.id, verifiedAt: sql<Date>`now()`, verificationNote: reason })
+      .where('id', '=', id)
+      .execute();
+    await this.audit.record(trx, { action: 'payment.failed', entityType: 'payment', entityId: id, before: { status: p.status }, after: { status: 'FAILED' }, reason });
+    if (p.collectedBy && p.collectedBy !== actor.id) {
+      await this.notifications.notify(trx, [p.collectedBy], {
+        type: 'PAYMENT_FAILED',
+        title: 'Payment could not be verified',
+        body: `₹${p.amount} (${p.mode}) was rejected: ${reason}`,
+        data: { paymentId: id },
+      });
+    }
+    return this.detail(trx, id);
   }
 
   /**
@@ -248,54 +250,56 @@ export class PaymentsService {
    * FIFO re-runs so other credits fill any invoices that reopened.
    */
   async reverse(id: string, reason: string, actor: AuthUser) {
-    return this.db.transaction().execute(async (trx) => {
-      const p = await this.lockPayment(trx, id);
-      if (p.status !== 'CONFIRMED') throw conflict('PAYMENT_NOT_CONFIRMED', `Only confirmed payments can be reversed (this one is ${p.status})`);
+    return this.db.transaction().execute((trx) => this.reverseIn(trx, id, reason, actor));
+  }
 
-      const inPending = await trx
-        .selectFrom('cashHandoverItems as i')
-        .innerJoin('cashHandovers as h', 'h.id', 'i.handoverId')
-        .select('h.handoverNumber')
-        .where('i.paymentId', '=', id)
-        .where('h.status', '=', 'SUBMITTED')
-        .executeTakeFirst();
-      if (inPending) {
-        throw conflict('PAYMENT_IN_PENDING_HANDOVER', `Confirm or reject cash handover ${inPending.handoverNumber} first`);
-      }
-      const refunded = await trx
-        .selectFrom('allocations')
-        .select(sql<string>`coalesce(sum(amount), 0)`.as('n'))
-        .where('paymentId', '=', id)
-        .where('refundId', 'is not', null)
-        .executeTakeFirstOrThrow();
-      if (toPaise(refunded.n) > 0n) throw conflict('PAYMENT_REFUNDED', 'Part of this payment was refunded; it cannot be reversed');
+  async reverseIn(trx: Database, id: string, reason: string, actor: AuthUser) {
+    const p = await this.lockPayment(trx, id);
+    if (p.status !== 'CONFIRMED') throw conflict('PAYMENT_NOT_CONFIRMED', `Only confirmed payments can be reversed (this one is ${p.status})`);
 
-      const today = businessDateOf(new Date());
-      await trx.insertInto('paymentReversals').values({ paymentId: id, reason, approvedBy: actor.id }).execute();
-      await this.ledger.reverse(trx, { paymentId: id }, today, `Payment reversed: ${reason}`, actor.id);
-      await this.ledger.releaseAllocations(trx, { paymentId: id }, actor.id);
-      await trx.updateTable('payments').set({ status: 'REVERSED' }).where('id', '=', id).execute();
-      await this.receipts.cancelForPayment(trx, id, `Payment reversed: ${reason}`, actor.id);
-      await this.ledger.allocate(trx, p.customerId, actor.id);
+    const inPending = await trx
+      .selectFrom('cashHandoverItems as i')
+      .innerJoin('cashHandovers as h', 'h.id', 'i.handoverId')
+      .select('h.handoverNumber')
+      .where('i.paymentId', '=', id)
+      .where('h.status', '=', 'SUBMITTED')
+      .executeTakeFirst();
+    if (inPending) {
+      throw conflict('PAYMENT_IN_PENDING_HANDOVER', `Confirm or reject cash handover ${inPending.handoverNumber} first`);
+    }
+    const refunded = await trx
+      .selectFrom('allocations')
+      .select(sql<string>`coalesce(sum(amount), 0)`.as('n'))
+      .where('paymentId', '=', id)
+      .where('refundId', 'is not', null)
+      .executeTakeFirstOrThrow();
+    if (toPaise(refunded.n) > 0n) throw conflict('PAYMENT_REFUNDED', 'Part of this payment was refunded; it cannot be reversed');
 
-      await this.audit.record(trx, {
-        action: 'payment.reversed',
-        entityType: 'payment',
-        entityId: id,
-        before: { status: 'CONFIRMED', amount: p.amount },
-        after: { status: 'REVERSED' },
-        reason,
-      });
-      if (p.collectedBy && p.collectedBy !== actor.id) {
-        await this.notifications.notify(trx, [p.collectedBy], {
-          type: 'PAYMENT_REVERSED',
-          title: 'Payment reversed',
-          body: `₹${p.amount} collected on ${p.paymentDate} was reversed: ${reason}`,
-          data: { paymentId: id },
-        });
-      }
-      return this.detail(trx, id);
+    const today = businessDateOf(new Date());
+    await trx.insertInto('paymentReversals').values({ paymentId: id, reason, approvedBy: actor.id }).execute();
+    await this.ledger.reverse(trx, { paymentId: id }, today, `Payment reversed: ${reason}`, actor.id);
+    await this.ledger.releaseAllocations(trx, { paymentId: id }, actor.id);
+    await trx.updateTable('payments').set({ status: 'REVERSED' }).where('id', '=', id).execute();
+    await this.receipts.cancelForPayment(trx, id, `Payment reversed: ${reason}`, actor.id);
+    await this.ledger.allocate(trx, p.customerId, actor.id);
+
+    await this.audit.record(trx, {
+      action: 'payment.reversed',
+      entityType: 'payment',
+      entityId: id,
+      before: { status: 'CONFIRMED', amount: p.amount },
+      after: { status: 'REVERSED' },
+      reason,
     });
+    if (p.collectedBy && p.collectedBy !== actor.id) {
+      await this.notifications.notify(trx, [p.collectedBy], {
+        type: 'PAYMENT_REVERSED',
+        title: 'Payment reversed',
+        body: `₹${p.amount} collected on ${p.paymentDate} was reversed: ${reason}`,
+        data: { paymentId: id },
+      });
+    }
+    return this.detail(trx, id);
   }
 
   // ---------------------------------------------------------------------------
@@ -306,7 +310,8 @@ export class PaymentsService {
     let query = this.db
       .selectFrom('payments as p')
       .innerJoin('customers as c', 'c.id', 'p.customerId')
-      .leftJoin('users as u', 'u.id', 'p.collectedBy');
+      .leftJoin('users as u', 'u.id', 'p.collectedBy')
+      .leftJoin('paymentReversals as pr', 'pr.paymentId', 'p.id');
     // Agents see only what they collected themselves.
     if (!canReadAllCustomers(user.role)) query = query.where('p.collectedBy', '=', user.id);
     if (q.customerId) query = query.where('p.customerId', '=', q.customerId);
@@ -334,6 +339,8 @@ export class PaymentsService {
           'c.name as customerName',
           'u.fullName as collectedByName',
           'p.collectedBy',
+          sql<string | null>`coalesce(pr.reason, CASE WHEN p.status = 'FAILED' THEN p.verification_note END)`.as('correctionNote'),
+          sql<boolean>`EXISTS (SELECT 1 FROM users x WHERE x.role = 'AGENT' AND x.id = coalesce(pr.approved_by, CASE WHEN p.status = 'FAILED' THEN p.verified_by END))`.as('deletedByAgent'),
         ])
         .orderBy('p.paymentDate', 'desc')
         .orderBy('p.createdAt', 'desc')

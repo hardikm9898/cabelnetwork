@@ -45,6 +45,13 @@ export type CreateSubscriptionRequest = z.infer<typeof createSubscriptionRequest
 export const changeRateRequest = z.object({ monthlyRate: nonNegativeMoney, effectiveFrom: businessDate, reason });
 export type ChangeRateRequest = z.infer<typeof changeRateRequest>;
 
+/**
+ * The customer's monthly charge from the next bill on (bills already made stay). A customer
+ * without a plan starts billing on the 1st of next month at this charge.
+ */
+export const setMonthlyChargeRequest = z.object({ monthlyRate: nonNegativeMoney, reason: optionalTrimmed(300) });
+export type SetMonthlyChargeRequest = z.infer<typeof setMonthlyChargeRequest>;
+
 export const updateSubscriptionTermsRequest = z
   .object({
     billingIntervalMonths: z.number().int().min(1).max(24),

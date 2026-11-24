@@ -8,7 +8,7 @@ import { date, inr, label, monthStart, today } from '../lib/format';
 import { AgentSelect, ReasonDialog } from '../components/shared';
 import { ActionDialog } from '../components/ActionDialog';
 import { Badge, Button, Card, DataTable, Field, FilterBar, Input, PageHeader, Pagination, Select, StatusBadge, Tabs, Textarea, useToast } from '../components/ui';
-import { openReceipt } from './CustomerDetail';
+import { openReceipt, PaymentStatus } from './CustomerDetail';
 
 interface Row {
   id: string;
@@ -24,6 +24,8 @@ interface Row {
   customerCode: string;
   customerName: string;
   collectedByName: string | null;
+  correctionNote: string | null;
+  deletedByAgent: boolean;
 }
 
 export default function PaymentsPage() {
@@ -100,7 +102,7 @@ function AllPayments() {
             header: 'Status',
             cell: (r) => (
               <span className="flex flex-wrap gap-1">
-                <StatusBadge status={r.status} />
+                <PaymentStatus status={r.status} deletedByAgent={r.deletedByAgent} note={r.correctionNote} />
                 {r.reviewFlags.includes('POSSIBLE_DUPLICATE') && <Badge tone="warn">possible duplicate</Badge>}
                 {r.recordedOffline && <Badge tone="info">offline</Badge>}
               </span>

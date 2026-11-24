@@ -6,3 +6,4 @@ export * from './money';
 export * from './billing';
 export * from './allocation';
 export * from './format';
+export * from './months';

@@ -5,6 +5,8 @@ import {
   SYNC_PAYLOADS,
   type FollowUpDoneOpPayload,
   type ListSyncReviewQuery,
+  type PaymentCancelOpPayload,
+  type PaymentCancelOpResult,
   type PaymentOpPayload,
   type PaymentOpResult,
   type SyncCustomer,
@@ -27,6 +29,8 @@ import { AuditService } from '../core/audit.service';
 import { SettingsService } from '../core/settings.service';
 import { FieldOpsService } from '../fieldops/fieldops.service';
 import type { ReceiptSnapshot } from '../finance/receipts.service';
+import { AlertsService } from '../finance/alerts.service';
+import { monthBills } from '../finance/month-bills';
 import { PaymentsService } from '../finance/payments.service';
 
 /** Phone clocks within this many seconds of the server are taken as right. */
@@ -71,6 +75,7 @@ export class SyncService {
     private readonly collections: CollectionsService,
     private readonly settings: SettingsService,
     private readonly audit: AuditService,
+    private readonly alerts: AlertsService,
   ) {}
 
   private assertAgent(user: AuthUser) {
@@ -133,6 +138,9 @@ export class SyncService {
             break;
           case 'FOLLOWUP_DONE':
             applied = await this.applyFollowUpDone(trx, user, parsed.data as FollowUpDoneOpPayload);
+            break;
+          case 'PAYMENT_CANCEL':
+            applied = await this.applyPaymentCancel(trx, user, parsed.data as PaymentCancelOpPayload);
             break;
         }
         await trx
@@ -325,6 +333,61 @@ export class SyncService {
     return { status: 'APPLIED', flags: [], customerId, paymentId: null, visitId: null, result: { followUpId: f.followUpId, alreadyClosed } };
   }
 
+  /**
+   * The agent deletes a payment they entered by mistake. Nothing is erased: a confirmed payment is
+   * reversed (receipt cancelled, balance restored), an unverified one is marked failed; the reason
+   * is kept and the office gets an alert. Cash already handed over is corrected by the office.
+   */
+  private async applyPaymentCancel(trx: Database, user: AuthUser, c: PaymentCancelOpPayload): Promise<Applied> {
+    let q = trx
+      .selectFrom('payments as p')
+      .innerJoin('customers as c', 'c.id', 'p.customerId')
+      .select(['p.id', 'p.status', 'p.collectedBy', 'p.amount', 'p.mode', 'p.paymentDate', 'p.customerId', 'c.name as customerName', 'c.customerCode']);
+    q = c.paymentId ? q.where('p.id', '=', c.paymentId) : q.where('p.clientTxnId', '=', c.paymentOpId!);
+    const p = await q.executeTakeFirst();
+    if (!p) {
+      if (c.paymentOpId) {
+        const created = await trx.selectFrom('syncOperations').select(['status', 'userId']).where('opId', '=', c.paymentOpId).executeTakeFirst();
+        // The payment entry was refused, so there is nothing to delete.
+        if (created?.status === 'REJECTED' && created.userId === user.id) {
+          const result: PaymentCancelOpResult = { paymentId: null, status: 'NOT_CREATED', alreadyDone: true };
+          return { status: 'APPLIED', flags: [], customerId: c.customerId, paymentId: null, visitId: null, result };
+        }
+        // Not received yet (sent in the same batch and asked to retry): try again later.
+        if (!created) throw new Error(`payment entry ${c.paymentOpId} has not arrived yet`);
+      }
+      throw notFound('PAYMENT_NOT_FOUND', 'Payment not found');
+    }
+    if (p.collectedBy !== user.id) throw notFound('PAYMENT_NOT_FOUND', 'Only the agent who collected a payment can delete it');
+    if (p.status === 'REVERSED' || p.status === 'FAILED') {
+      const result: PaymentCancelOpResult = { paymentId: p.id, status: p.status, alreadyDone: true };
+      return { status: 'APPLIED', flags: [], customerId: p.customerId, paymentId: p.id, visitId: null, result };
+    }
+    const handedOver = await trx
+      .selectFrom('cashHandoverItems as i')
+      .innerJoin('cashHandovers as h', 'h.id', 'i.handoverId')
+      .select('h.handoverNumber')
+      .where('i.paymentId', '=', p.id)
+      .executeTakeFirst();
+    if (handedOver) {
+      throw unprocessable('PAYMENT_HANDED_OVER', `This cash is in handover ${handedOver.handoverNumber}. Ask the office to reverse it.`);
+    }
+    const reason = `Deleted by agent: ${c.reason}`;
+    if (p.status === 'CONFIRMED') await this.payments.reverseIn(trx, p.id, reason, user);
+    else await this.payments.failIn(trx, p.id, reason, user);
+    const agent = await trx.selectFrom('users').select('fullName').where('id', '=', user.id).executeTakeFirst();
+    await this.alerts.raise(trx, {
+      type: 'PAYMENT_DELETED_BY_AGENT',
+      severity: 'WARNING',
+      entityType: 'payment',
+      entityId: p.id,
+      message: `${agent?.fullName ?? 'Agent'} deleted the ₹${fromPaise(toPaise(p.amount))} ${p.mode.toLowerCase()} payment of ${p.customerName} (${p.customerCode}) dated ${p.paymentDate}: ${c.reason}`,
+      details: { customerId: p.customerId, customerCode: p.customerCode, amount: p.amount, mode: p.mode, paymentDate: p.paymentDate, reason: c.reason, agentId: user.id },
+    });
+    const result: PaymentCancelOpResult = { paymentId: p.id, status: p.status === 'CONFIRMED' ? 'REVERSED' : 'FAILED', alreadyDone: false };
+    return { status: 'APPLIED', flags: [], customerId: p.customerId, paymentId: p.id, visitId: null, result };
+  }
+
   private async touchDevice(user: AuthUser) {
     if (!user.deviceId) return;
     await this.db.updateTable('devices').set({ lastSyncAt: sql<Date>`now()` }).where('id', '=', user.deviceId).where('userId', '=', user.id).execute();
@@ -376,13 +439,18 @@ export class SyncService {
           customerCode: i.customerCode,
           name: i.name,
           mobile: i.mobile,
+          altMobile: x?.altMobile ?? null,
           addressLine: i.addressLine,
           landmark: i.landmark,
           society: i.society,
+          notes: x?.notes ?? null,
+          stbNumbers: x?.stbNumbers ?? [],
+          mqNumbers: x?.mqNumbers ?? [],
           status: x?.status ?? 'ACTIVE',
           assignment: i.assignment,
           temporaryUntil: x?.temporaryUntil ?? null,
           monthlyRate: x?.monthlyRate ?? null,
+          upcomingRate: x?.upcomingRate ?? null,
           outstanding: i.outstanding,
           advance: i.advance,
           oldestDueDate: i.oldestDueDate,
@@ -396,6 +464,7 @@ export class SyncService {
           lastVisitOutcome: i.lastVisitOutcome,
           recentPayments: x?.recentPayments ?? [],
           recentVisits: x?.recentVisits ?? [],
+          bills: x?.bills ?? [],
         };
       })
       .sort((a, b) => a.customerCode.localeCompare(b.customerCode));
@@ -428,13 +497,17 @@ export class SyncService {
 
   /** Detail the list query does not carry, fetched for all of the agent's customers at once. */
   private async customerExtras(agentId: string, ids: string[], today: string) {
-    type Extra = Pick<SyncCustomer, 'status' | 'temporaryUntil' | 'monthlyRate' | 'openInvoices' | 'pendingVerification' | 'recentPayments' | 'recentVisits'>;
+    type Extra = Pick<
+      SyncCustomer,
+      'status' | 'temporaryUntil' | 'monthlyRate' | 'upcomingRate' | 'openInvoices' | 'pendingVerification' | 'recentPayments' | 'recentVisits' | 'altMobile' | 'notes' | 'stbNumbers' | 'mqNumbers' | 'bills'
+    >;
     const out = new Map<string, Extra>();
     if (ids.length === 0) return out;
     const m = (v: unknown) => fromPaise(toPaise(String(v ?? '0')));
-    const [heads, rates, invoices, pending, payments, visits] = await Promise.all([
-      sql<{ id: string; status: string; temporaryUntil: Date | null }>`
-        SELECT c.id, c.status::text AS status, CASE WHEN a.kind = 'TEMPORARY' THEN upper(a.valid_during) END AS temporary_until
+    const [heads, rates, upcoming, invoices, pending, payments, visits, boxes, bills] = await Promise.all([
+      sql<{ id: string; status: string; temporaryUntil: Date | null; altMobile: string | null; notes: string | null }>`
+        SELECT c.id, c.status::text AS status, CASE WHEN a.kind = 'TEMPORARY' THEN upper(a.valid_during) END AS temporary_until,
+               c.alt_mobile, c.notes
         FROM customer_current_agent ca
         JOIN customers c ON c.id = ca.customer_id
         JOIN customer_agent_assignments a ON a.id = ca.assignment_id
@@ -444,6 +517,11 @@ export class SyncService {
         FROM customer_subscriptions s JOIN subscription_rates r ON r.subscription_id = s.id AND r.effective_from <= ${today}::date
         WHERE s.customer_id = ANY(${ids}::uuid[]) AND s.status <> 'ENDED'
         ORDER BY s.customer_id, r.effective_from DESC`.execute(this.db),
+      sql<{ customerId: string; monthlyRate: string; effectiveFrom: string }>`
+        SELECT DISTINCT ON (s.customer_id) s.customer_id, r.monthly_rate, r.effective_from
+        FROM customer_subscriptions s JOIN subscription_rates r ON r.subscription_id = s.id AND r.effective_from > ${today}::date
+        WHERE s.customer_id = ANY(${ids}::uuid[]) AND s.status <> 'ENDED'
+        ORDER BY s.customer_id, r.effective_from`.execute(this.db),
       sql<{ id: string; customerId: string; kind: string; periodStart: string | null; periodEnd: string | null; dueDate: string; balance: string }>`
         SELECT i.id, i.customer_id, i.kind::text AS kind, i.period_start, i.period_end, i.due_date, i.total - i.amount_paid AS balance
         FROM invoices i
@@ -452,16 +530,33 @@ export class SyncService {
       sql<{ customerId: string; amount: string }>`
         SELECT customer_id, sum(amount) AS amount FROM payments
         WHERE customer_id = ANY(${ids}::uuid[]) AND status = 'PENDING_VERIFICATION' GROUP BY customer_id`.execute(this.db),
-      sql<{ id: string; customerId: string; amount: string; paymentDate: string; mode: string; status: string; receiptNumber: string | null; collectedByName: string | null }>`
+      sql<{
+        id: string;
+        customerId: string;
+        amount: string;
+        paymentDate: string;
+        mode: string;
+        status: string;
+        receiptNumber: string | null;
+        collectedByName: string | null;
+        clientTxnId: string | null;
+        canDelete: boolean;
+        note: string | null;
+      }>`
         SELECT * FROM (
           SELECT p.id, p.customer_id, p.amount, p.payment_date, p.mode::text AS mode, p.status::text AS status,
                  r.receipt_number, u.full_name AS collected_by_name,
+                 CASE WHEN p.source = 'AGENT_COLLECTION' THEN p.client_txn_id END AS client_txn_id,
+                 (p.collected_by = ${agentId}::uuid AND p.status IN ('CONFIRMED', 'PENDING_VERIFICATION')
+                   AND NOT EXISTS (SELECT 1 FROM cash_handover_items hi WHERE hi.payment_id = p.id)) AS can_delete,
+                 coalesce(pr.reason, CASE WHEN p.status = 'FAILED' THEN p.verification_note END) AS note,
                  row_number() OVER (PARTITION BY p.customer_id ORDER BY p.payment_date DESC, p.created_at DESC) AS rn
           FROM payments p
           LEFT JOIN receipts r ON r.payment_id = p.id AND r.status = 'ISSUED'
           LEFT JOIN users u ON u.id = p.collected_by
+          LEFT JOIN payment_reversals pr ON pr.payment_id = p.id
           WHERE p.customer_id = ANY(${ids}::uuid[])
-        ) x WHERE rn <= 5 ORDER BY customer_id, rn`.execute(this.db),
+        ) x WHERE rn <= 8 ORDER BY customer_id, rn`.execute(this.db),
       sql<{ id: string; customerId: string; visitedAt: Date; outcome: string; notes: string | null; agentName: string }>`
         SELECT * FROM (
           SELECT v.id, v.customer_id, v.visited_at, v.outcome::text AS outcome, v.notes, u.full_name AS agent_name,
@@ -469,11 +564,31 @@ export class SyncService {
           FROM visits v JOIN users u ON u.id = v.agent_id
           WHERE v.customer_id = ANY(${ids}::uuid[])
         ) x WHERE rn <= 3 ORDER BY customer_id, rn`.execute(this.db),
+      sql<{ customerId: string; stbNumber: string; mqNumber: string | null }>`
+        SELECT customer_id, stb_number, mq_number FROM customer_connections
+        WHERE customer_id = ANY(${ids}::uuid[]) AND active_to IS NULL
+        ORDER BY customer_id, active_from`.execute(this.db),
+      // 13 months: this month and the 12 before it.
+      monthBills(this.db, ids, `${addDays(`${today.slice(0, 7)}-01`, -366).slice(0, 7)}-01`),
     ]);
     const get = (id: string) => {
       let e = out.get(id);
       if (!e) {
-        e = { status: 'ACTIVE', temporaryUntil: null, monthlyRate: null, openInvoices: [], pendingVerification: '0.00', recentPayments: [], recentVisits: [] };
+        e = {
+          status: 'ACTIVE',
+          temporaryUntil: null,
+          monthlyRate: null,
+          upcomingRate: null,
+          openInvoices: [],
+          pendingVerification: '0.00',
+          recentPayments: [],
+          recentVisits: [],
+          altMobile: null,
+          notes: null,
+          stbNumbers: [],
+          mqNumbers: [],
+          bills: [],
+        };
         out.set(id, e);
       }
       return e;
@@ -482,8 +597,17 @@ export class SyncService {
       const e = get(h.id);
       e.status = h.status;
       e.temporaryUntil = h.temporaryUntil ? new Date(h.temporaryUntil).toISOString() : null;
+      e.altMobile = h.altMobile;
+      e.notes = h.notes;
     }
+    for (const b of boxes.rows) {
+      const e = get(b.customerId);
+      e.stbNumbers.push(b.stbNumber);
+      if (b.mqNumber) e.mqNumbers.push(b.mqNumber);
+    }
+    for (const [id, list] of bills) get(id).bills = list;
     for (const r of rates.rows) get(r.customerId).monthlyRate = m(r.monthlyRate);
+    for (const r of upcoming.rows) get(r.customerId).upcomingRate = { monthlyRate: m(r.monthlyRate), from: r.effectiveFrom };
     for (const i of invoices.rows) {
       get(i.customerId).openInvoices.push({
         id: i.id,
@@ -494,7 +618,18 @@ export class SyncService {
     }
     for (const p of pending.rows) get(p.customerId).pendingVerification = m(p.amount);
     for (const p of payments.rows) {
-      get(p.customerId).recentPayments.push({ id: p.id, amount: m(p.amount), paymentDate: p.paymentDate, mode: p.mode, status: p.status, receiptNumber: p.receiptNumber, collectedByName: p.collectedByName });
+      get(p.customerId).recentPayments.push({
+        id: p.id,
+        amount: m(p.amount),
+        paymentDate: p.paymentDate,
+        mode: p.mode,
+        status: p.status,
+        receiptNumber: p.receiptNumber,
+        collectedByName: p.collectedByName,
+        clientTxnId: p.clientTxnId,
+        canDelete: p.canDelete,
+        note: p.note,
+      });
     }
     for (const v of visits.rows) {
       get(v.customerId).recentVisits.push({ id: v.id, visitedAt: new Date(v.visitedAt).toISOString(), outcome: v.outcome, notes: v.notes, agentName: v.agentName });

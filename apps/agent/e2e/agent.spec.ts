@@ -339,6 +339,82 @@ test.describe.serial('agent app', () => {
     await expect.poll(async () => (await paymentsByRef(ref)).length, { timeout: 30_000 }).toBe(1);
   });
 
+  // ---------------------------------------------------------------------------
+  // Full access to the agent's own customers (owner's request 2026-11-24)
+  // ---------------------------------------------------------------------------
+
+  test('search finds a customer by STB, MQ, Customer ID or name', async ({ page }) => {
+    await start(page, 0);
+    const [c] = await query<{ id: string; name: string; customer_code: string; stb: string }>(
+      `SELECT c.id, c.name, c.customer_code, cc.stb_number AS stb FROM customer_current_agent ca
+         JOIN customers c ON c.id = ca.customer_id JOIN customer_connections cc ON cc.customer_id = c.id AND cc.active_to IS NULL
+        WHERE ca.agent_id = $1 ORDER BY c.customer_code DESC LIMIT 1`,
+      [state.agents[0]!.id],
+    );
+    await query(`UPDATE customer_connections SET mq_number = '91089999' WHERE customer_id = $1 AND active_to IS NULL`, [c!.id]);
+    await page.reload();
+    await enterPin(page);
+    await page.getByTestId('go-list').click();
+    await page.getByTestId('filter-all').click();
+    const search = page.getByTestId('search');
+    for (const q of [c!.stb.slice(-7), '91089999', c!.customer_code, c!.name]) {
+      await search.fill(q);
+      await expect(page.getByRole('button', { name: new RegExp(`^${c!.name}, `) }).first()).toBeVisible();
+    }
+    await search.fill(c!.stb.slice(-7));
+    await expect(visibleText(page, `STB ${c!.stb}`)).toBeVisible();
+    await page.screenshot({ path: 'test-results/new-search.png' });
+  });
+
+  test('customer page: month calendar, all details, edit details and the monthly charge', async ({ page }) => {
+    await start(page, 0);
+    const { id } = await openPendingCustomer(page);
+    await expect(page.getByTestId('month-grid')).toBeVisible();
+    const thisMonth = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 7);
+    await page.getByTestId(`month-${thisMonth}`).click();
+    await expect(page.getByTestId('month-detail')).toContainText(/Bill/);
+    await page.screenshot({ path: 'test-results/new-customer.png', fullPage: true });
+
+    await page.getByTestId('edit-customer-button').click();
+    await page.getByTestId('edit-mq').fill('91081142');
+    await page.getByTestId('edit-rate').fill('450');
+    await page.screenshot({ path: 'test-results/new-edit.png', fullPage: true });
+    await page.getByTestId('save-customer').click();
+    await expect(visibleText(page, '91081142')).toBeVisible();
+    await expect(visibleText(page, /₹450\.00\/month from/)).toBeVisible();
+    const [box] = await query<{ mq_number: string }>(`SELECT mq_number FROM customer_connections WHERE customer_id = $1 AND active_to IS NULL`, [id]);
+    expect(box!.mq_number).toBe('91081142');
+    const rates = await query<{ monthly_rate: string }>(
+      `SELECT r.monthly_rate::text FROM subscription_rates r JOIN customer_subscriptions s ON s.id = r.subscription_id WHERE s.customer_id = $1 ORDER BY r.effective_from DESC LIMIT 1`,
+      [id],
+    );
+    expect(rates[0]!.monthly_rate).toBe('450.00');
+  });
+
+  test('delete a payment entered by mistake: the dues come back and the office gets an alert', async ({ page }) => {
+    await start(page, 0);
+    const { id, name } = await openPendingCustomer(page);
+    const due = (await page.getByTestId('customer-due').innerText()).trim();
+    await collectFullDue(page);
+    await expect(page.getByTestId('payment-result')).toHaveText('Payment saved');
+    await page.getByTestId('delete-this-payment').click();
+    await page.getByTestId('reason-reasonWrongAmount').click();
+    await page.screenshot({ path: 'test-results/new-delete.png', fullPage: true });
+    await page.getByTestId('confirm-delete').click();
+    await expect(page.getByTestId('payment-deleted')).toBeVisible();
+    await expect
+      .poll(async () => (await query<{ status: string }>(`SELECT status FROM payments WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1`, [id]))[0]?.status)
+      .toBe('REVERSED');
+    const alerts = await query<{ message: string }>(`SELECT message FROM system_alerts WHERE type = 'PAYMENT_DELETED_BY_AGENT'`);
+    expect(alerts.some((a) => a.message.includes('Wrong amount'))).toBe(true);
+    await page.getByTestId('done').click();
+    await page.getByTestId('filter-all').click();
+    await page.getByTestId('search').fill(name);
+    await page.getByRole('button', { name: new RegExp(`^${name}, `) }).first().click();
+    await expect(page.getByTestId('customer-due').filter({ visible: true })).toHaveText(due);
+    await expect(visibleText(page, 'Deleted')).toBeVisible();
+  });
+
   test('switches to Gujarati', async ({ page }) => {
     await start(page, 0);
     await page.getByRole('button', { name: 'Profile' }).click();

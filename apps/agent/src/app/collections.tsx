@@ -7,6 +7,7 @@ import { useApp } from '../lib/app-state';
 import { useOffline } from '../lib/offline';
 import { Badge, Card, Chips, ErrorBox, Loading, Money, Row, Screen, T, useOnline } from '../components/ui';
 import { OpStateBadge } from '../components/OpState';
+import { deletedPayments } from '../lib/offline/view';
 import { when } from '../components/SyncBar';
 
 interface Payment {
@@ -17,6 +18,8 @@ interface Payment {
   status: string;
   customerName: string;
   customerCode: string;
+  correctionNote: string | null;
+  deletedByAgent: boolean;
 }
 
 /** Payments this agent collected (today / 7 days / 30 days); entries still on the phone first. */
@@ -28,6 +31,7 @@ export default function MyCollections() {
     .getOps()
     .filter((o) => o.type === 'PAYMENT_CREATE' && o.userId === me?.id && (o.state === 'PENDING' || (o.state === 'REJECTED' && !o.acknowledgedAt)))
     .reverse();
+  const deleted = deletedPayments(store.getOps());
   const today = businessDateOf(new Date());
   const [range, setRange] = useState<'0' | '6' | '29'>('0');
   const from = addDays(today, -Number(range));
@@ -59,7 +63,7 @@ export default function MyCollections() {
             <T muted size={13}>
               {when(o.createdAt)} · {o.label.provisionalRef}
             </T>
-            <OpStateBadge op={o} />
+            {deleted.has(o.opId) ? <Badge tone="bad" text={t('deletedNotSent')} /> : <OpStateBadge op={o} />}
           </Row>
         </Card>
       ))}
@@ -79,8 +83,20 @@ export default function MyCollections() {
             <T muted size={13}>
               {formatDateIN(p.paymentDate)} · {p.customerCode} · {p.mode === 'CASH' ? t('cash') : p.mode === 'UPI' ? t('upi') : t('other')}
             </T>
-            {p.status !== 'CONFIRMED' && <Badge tone={p.status === 'PENDING_VERIFICATION' ? 'warn' : 'bad'} text={p.status === 'PENDING_VERIFICATION' ? t('pendingCheck') : p.status.toLowerCase()} />}
+            {deleted.has(p.id) && p.status !== 'REVERSED' && p.status !== 'FAILED' ? (
+              <Badge tone="warn" text={t('deletedNotSent')} />
+            ) : p.status !== 'CONFIRMED' ? (
+              <Badge
+                tone={p.status === 'PENDING_VERIFICATION' ? 'warn' : 'bad'}
+                text={p.status === 'PENDING_VERIFICATION' ? t('pendingCheck') : p.deletedByAgent ? t('deleted') : p.status.toLowerCase()}
+              />
+            ) : null}
           </Row>
+          {p.correctionNote && (
+            <T muted size={12}>
+              {p.correctionNote}
+            </T>
+          )}
         </Card>
       ))}
     </Screen>

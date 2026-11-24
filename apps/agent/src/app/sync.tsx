@@ -9,7 +9,14 @@ import { when } from '../components/SyncBar';
 
 function OpRow({ op }: { op: OutboxOp }) {
   const { t } = useApp();
-  const what: Key = op.type === 'PAYMENT_CREATE' ? 'typePayment' : op.type === 'FOLLOWUP_DONE' ? 'typeFollowUp' : (outcomeKey[String(op.payload.outcome)] ?? 'typeVisit');
+  const what: Key =
+    op.type === 'PAYMENT_CREATE'
+      ? 'typePayment'
+      : op.type === 'PAYMENT_CANCEL'
+        ? 'typePaymentDeleted'
+        : op.type === 'FOLLOWUP_DONE'
+          ? 'typeFollowUp'
+          : (outcomeKey[String(op.payload.outcome)] ?? 'typeVisit');
   return (
     <Card testID={`op-${op.state}`} onPress={op.type === 'PAYMENT_CREATE' ? () => router.push({ pathname: '/receipt/[id]', params: { id: op.opId } }) : undefined}>
       <Row>

@@ -147,6 +147,11 @@ export function useActions(online: boolean) {
         if (online) void engine.sync();
         return op;
       },
+      cancelPayment: async (customer: SyncCustomer, p: { paymentOpId: string | null; paymentId: string | null; amount: string; reason: string }) => {
+        const op = await actions.cancelPayment(store, requireActor(), { customer, ...p, offline: !online, now: new Date(), newId });
+        if (online) void engine.sync();
+        return op;
+      },
       acknowledge: (opId: string) => actions.acknowledge(store, opId, new Date()),
       syncNow: () => engine.sync(),
     }),

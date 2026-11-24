@@ -37,6 +37,8 @@ import {
   RefundRequest,
   reverseCreditRequest,
   reversePaymentRequest,
+  setMonthlyChargeRequest,
+  SetMonthlyChargeRequest,
   submitHandoverRequest,
   SubmitHandoverRequest,
   suspendRequest,
@@ -113,6 +115,21 @@ export class CustomerFinanceController {
   @Get('subscription')
   subscription(@CurrentUser() user: AuthUser, @Param('customerId', ParseUUIDPipe) id: string) {
     return this.subscriptions.getForCustomer(id, user);
+  }
+
+  /** Month-by-month bills: which months are paid and which are not. */
+  @AnyAuthenticated()
+  @Get('months')
+  months(@CurrentUser() user: AuthUser, @Param('customerId', ParseUUIDPipe) id: string) {
+    return this.ledgerQueries.months(id, user);
+  }
+
+  /** Monthly charge from the next bill (agents: their own customers). */
+  @RequirePermissions('billing:rate')
+  @Post('monthly-charge')
+  @HttpCode(200)
+  monthlyCharge(@CurrentUser() user: AuthUser, @Param('customerId', ParseUUIDPipe) id: string, @ZodBody(setMonthlyChargeRequest) body: SetMonthlyChargeRequest) {
+    return this.subscriptions.setMonthlyCharge(id, body, user);
   }
 
   @RequirePermissions('billing:manage')

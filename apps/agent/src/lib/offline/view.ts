@@ -25,6 +25,20 @@ export interface ListItem extends SyncCustomer {
   waitingToSend: boolean;
 }
 
+/**
+ * Payments the agent deleted on this phone (by payment entry id and by server id). A deletion the
+ * server refused (e.g. cash already handed over) does not count.
+ */
+export function deletedPayments(ops: OutboxOp[]): Set<string> {
+  const out = new Set<string>();
+  for (const o of ops) {
+    if (o.type !== 'PAYMENT_CANCEL' || o.state === 'REJECTED') continue;
+    if (o.payload.paymentOpId) out.add(String(o.payload.paymentOpId));
+    if (o.payload.paymentId) out.add(String(o.payload.paymentId));
+  }
+  return out;
+}
+
 /** Entries made on this phone that the current snapshot does not reflect yet. */
 export function notInSnapshot(ops: OutboxOp[], header: SnapshotHeader | null): OutboxOp[] {
   const pulledAt = header?.pulledAt ?? '';
@@ -40,6 +54,7 @@ export function buildList(customers: SyncCustomer[], header: SnapshotHeader | nu
   const today = businessDateOf(now);
   const sameDay = header?.today === today;
   const local = notInSnapshot(ops, header);
+  const deleted = deletedPayments(ops);
   const doneFollowUps = new Set(
     ops.filter((o) => o.type === 'FOLLOWUP_DONE' && o.state !== 'REJECTED').map((o) => String(o.payload.followUpId)),
   );
@@ -49,7 +64,7 @@ export function buildList(customers: SyncCustomer[], header: SnapshotHeader | nu
     .filter((c) => !isHidden(c, now))
     .map((c) => {
       const mine = local.filter((o) => o.label.customerId === c.id && businessDateOf(new Date(o.createdAt)) === today);
-      const pays = mine.filter((o) => o.type === 'PAYMENT_CREATE');
+      const pays = mine.filter((o) => o.type === 'PAYMENT_CREATE' && !deleted.has(o.opId));
       const unsent = pays.reduce((s, o) => s + toPaise(String(o.payload.amount)), 0n);
       const serverPaidToday = sameDay ? toPaise(c.paidToday) : 0n;
       const owes = toPaise(c.outstanding) > 0n;
@@ -68,6 +83,10 @@ export function buildList(customers: SyncCustomer[], header: SnapshotHeader | nu
         todayStatus: status,
         unsentAmount: unsent > 0n ? fromPaise(unsent) : null,
         waitingToSend: pays.some((o) => o.state === 'PENDING'),
+      stbNumbers: c.stbNumbers ?? [],
+      mqNumbers: c.mqNumbers ?? [],
+      bills: c.bills ?? [],
+      upcomingRate: c.upcomingRate ?? null,
       };
     });
 }
@@ -98,24 +117,45 @@ export const SORTS: Record<Sort, (a: ListItem, b: ListItem) => number> = {
   last_visit: (a, b) => (a.lastVisitAt ?? '').localeCompare(b.lastVisitAt ?? '') || byName(a, b),
 };
 
-export function search(items: ListItem[], q: string): ListItem[] {
-  const needle = q.trim().toLowerCase();
-  if (!needle) return items;
-  const digits = q.replace(/\D/g, '');
-  return items.filter(
-    (i) =>
-      i.name.toLowerCase().includes(needle) ||
-      i.customerCode.startsWith(needle) ||
-      i.addressLine.toLowerCase().includes(needle) ||
-      i.society.toLowerCase().includes(needle) ||
-      (digits.length >= 3 && !!i.mobile?.includes(digits)),
-  );
+/**
+ * Finds customers by name, Customer ID, mobile, set-top box (STB) number, MQ number, address or
+ * society. Every word must match somewhere ("ram 402" finds Ram in flat 402). Best matches first:
+ * exact Customer ID, then ID / box / MQ starting with the text, then the rest.
+ */
+export function search<T extends ListItem>(items: T[], q: string): T[] {
+  const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return items;
+  const scored: { i: T; score: number }[] = [];
+  for (const i of items) {
+    const code = i.customerCode.toLowerCase();
+    const boxes = [...(i.stbNumbers ?? []), ...(i.mqNumbers ?? [])].map((b) => b.toLowerCase());
+    const phones = [i.mobile, i.altMobile].filter((m): m is string => !!m);
+    const text = [i.name, i.addressLine, i.society, i.landmark ?? ''].join(' ').toLowerCase();
+    let score = 0;
+    const all = words.every((w) => {
+      const digits = w.replace(/\D/g, '');
+      if (code === w) score += 100;
+      else if (code.startsWith(w)) score += 50;
+      else if (code.includes(w)) score += 20;
+      else if (boxes.some((b) => b === w)) score += 90;
+      else if (boxes.some((b) => b.startsWith(w) || (w.length >= 4 && b.endsWith(w)))) score += 40;
+      else if (w.length >= 3 && boxes.some((b) => b.includes(w))) score += 15;
+      else if (digits.length >= 3 && digits === w && phones.some((m) => m.includes(digits))) score += 30;
+      else if (i.name.toLowerCase().startsWith(w)) score += 25;
+      else if (text.includes(w)) score += 10;
+      else return false;
+      return true;
+    });
+    if (all) scored.push({ i, score });
+  }
+  return scored.sort((a, b) => b.score - a.score).map((s) => s.i);
 }
 
 /** Money collected on this phone that the snapshot's day figures do not include yet. */
 export function unsentToday(ops: OutboxOp[], header: SnapshotHeader | null, now: Date) {
   const today = businessDateOf(now);
-  const pays = notInSnapshot(ops, header).filter((o) => o.type === 'PAYMENT_CREATE' && businessDateOf(new Date(o.createdAt)) === today);
+  const deleted = deletedPayments(ops);
+  const pays = notInSnapshot(ops, header).filter((o) => o.type === 'PAYMENT_CREATE' && !deleted.has(o.opId) && businessDateOf(new Date(o.createdAt)) === today);
   return { count: pays.length, amount: fromPaise(pays.reduce((s, o) => s + toPaise(String(o.payload.amount)), 0n)) };
 }
 

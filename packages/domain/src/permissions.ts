@@ -17,6 +17,7 @@ export const PERMISSIONS = [
   'customers:read:all',
   'customers:read:assigned',
   'customers:manage',
+  'customers:edit', // change a customer's details (agents: their own customers, not the society)
   'assignments:read',
   'assignments:manage',
   'settings:read',
@@ -27,6 +28,7 @@ export const PERMISSIONS = [
   // Financial (Phase 3)
   'billing:read',
   'billing:manage', // subscriptions, rates, suspensions, manual invoices, billing runs, invoice cancellation
+  'billing:rate', // set a customer's monthly charge from the next bill (agents: their own customers)
   'payments:record', // record a payment for a customer the caller may access
   'payments:read:all',
   'payments:verify', // confirm / fail pending UPI, bank, cheque payments
@@ -54,6 +56,7 @@ const ADMIN_PERMISSIONS: readonly Permission[] = [
   'societies:manage',
   'customers:read:all',
   'customers:manage',
+  'customers:edit',
   'assignments:read',
   'assignments:manage',
   'settings:read',
@@ -61,6 +64,7 @@ const ADMIN_PERMISSIONS: readonly Permission[] = [
   'notifications:read:own',
   'billing:read',
   'billing:manage',
+  'billing:rate',
   'payments:record',
   'payments:read:all',
   'payments:verify',
@@ -77,6 +81,8 @@ const ADMIN_PERMISSIONS: readonly Permission[] = [
 
 const AGENT_PERMISSIONS: readonly Permission[] = [
   'customers:read:assigned',
+  'customers:edit',
+  'billing:rate',
   'societies:read',
   'notifications:read:own',
   'payments:record',

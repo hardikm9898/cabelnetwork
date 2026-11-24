@@ -24,13 +24,15 @@ A local cable TV operator in the Chandlodia / Gota area of Ahmedabad (per the cu
 |---|---|---|---|
 | Dashboard (business-wide) | ✓ | ✓ | own only |
 | Customers: view | all | all | assigned (incl. temporary) |
-| Customers: create/edit/deactivate | ✓ | ✓ | ✗ |
-| Change rate / billing config | ✓ | ✓ | ✗ |
+| Customers: create/deactivate/delete | ✓ | ✓ | ✗ |
+| Customers: edit details (name, mobiles, address, ID, STB/MQ, notes) | ✓ | ✓ | assigned customers (not the society; owner's request 2026-11-24) |
+| Monthly charge (from the next bill) | ✓ | ✓ | assigned customers; the office is notified |
+| Billing config (terms, suspensions, back-dated rates) | ✓ | ✓ | ✗ |
 | Areas, societies, agents | ✓ | ✓ | ✗ |
 | Assign / temporarily reassign | ✓ | ✓ | ✗ (cannot self-assign) |
 | Record payment | any customer | any customer | assigned customers |
 | Verify UPI / cheque | ✓ | ✓ | ✗ |
-| Reverse payment / cancel receipt | ✓ | ✓ (reason) | request only |
+| Reverse payment / cancel receipt | ✓ | ✓ (reason) | delete own payment entered by mistake, with a reason, until the cash is handed over; the office gets an alert |
 | Discounts / adjustments / refunds | ✓ | ✓ up to limit | ✗ |
 | Visits, promises, follow-ups | ✓ | ✓ | assigned customers |
 | Cash handover | verify | verify | submit |

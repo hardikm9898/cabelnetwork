@@ -618,7 +618,7 @@ export interface FollowUpTasksTable {
   outcomeNote: string | null;
 }
 
-export type SyncOpType = 'PAYMENT_CREATE' | 'VISIT_CREATE' | 'FOLLOWUP_DONE';
+export type SyncOpType = 'PAYMENT_CREATE' | 'VISIT_CREATE' | 'FOLLOWUP_DONE' | 'PAYMENT_CANCEL';
 export type SyncOpStoredStatus = 'APPLIED' | 'NEEDS_REVIEW' | 'REJECTED';
 
 export interface SyncOperationsTable {

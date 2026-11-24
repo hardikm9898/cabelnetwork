@@ -6,6 +6,8 @@ import type { PaymentOpResult } from '@cablenet/contracts';
 import { api } from '../../lib/api';
 import { useApp } from '../../lib/app-state';
 import { OutboxOp, useActions, useOffline } from '../../lib/offline';
+import { deletedPayments } from '../../lib/offline/view';
+import { businessDateOf } from '@cablenet/domain';
 import { provisionalMessage, receiptMessage, ReceiptSnapshot, whatsappUrl } from '../../lib/share';
 import { openExternal } from '../../lib/open';
 import { Button, C, Card, ErrorBox, Loading, Money, Row, Screen, T, useOnline } from '../../components/ui';
@@ -204,10 +206,39 @@ export default function Receipt() {
     body = <Final v={{ amount: p.amount, status: p.status, receiptId: p.receipt?.id ?? null, receiptNumber: p.receipt?.receiptNumber ?? null, snapshot: p.receipt?.snapshot ?? null }} flags={[]} />;
   }
 
+  const isDeleted = op ? deletedPayments(store.getOps()).has(op.opId) : false;
+  const canDelete = !!op && op.type === 'PAYMENT_CREATE' && op.state !== 'REJECTED' && !isDeleted && !!op.label.customerId && !!store.getCustomer(op.label.customerId);
   return (
     <Screen>
+      {isDeleted && (
+        <Card testID="payment-deleted" style={{ backgroundColor: C.dangerSoft, borderColor: 'transparent' }}>
+          <T weight="800" style={{ color: C.danger }}>
+            {t('deleted')}
+          </T>
+        </Card>
+      )}
       {body}
       <Button testID="done" title={t('done')} variant="secondary" onPress={() => router.dismissTo('/customers')} />
+      {canDelete && (
+        <Button
+          testID="delete-this-payment"
+          title={t('enteredByMistake')}
+          variant="secondary"
+          onPress={() =>
+            router.push({
+              pathname: '/delete-payment',
+              params: {
+                customerId: op!.label.customerId!,
+                paymentOpId: op!.opId,
+                paymentId: '',
+                amount: String(op!.payload.amount),
+                date: businessDateOf(new Date(op!.createdAt)),
+                mode: String(op!.payload.mode),
+              },
+            })
+          }
+        />
+      )}
     </Screen>
   );
 }

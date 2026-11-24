@@ -59,7 +59,8 @@ export class CustomersController {
     return this.customers.create(body, user);
   }
 
-  @RequirePermissions('customers:manage')
+  /** Office: any customer. Agents: their own customers (not the society). */
+  @RequirePermissions('customers:edit')
   @Patch(':id')
   update(
     @CurrentUser() user: AuthUser,

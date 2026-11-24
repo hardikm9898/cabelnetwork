@@ -3,11 +3,13 @@ import { sql } from 'kysely';
 import type {
   ChangeRateRequest,
   CreateSubscriptionRequest,
+  SetMonthlyChargeRequest,
   SuspendRequest,
   UpdateSubscriptionTermsRequest,
 } from '@cablenet/contracts';
 import {
   addDays,
+  addMonths,
   businessDateOf,
   defaultAnchorDay,
   firstPeriodStart,
@@ -19,6 +21,7 @@ import { DATABASE, Database } from '../../db/database';
 import { conflict, notFound, unprocessable } from '../../common/errors';
 import type { AuthUser } from '../../common/request-context';
 import { AuditService } from '../core/audit.service';
+import { NotificationsService } from '../core/notifications.service';
 import { SettingsService } from '../core/settings.service';
 import { CustomerAccessService } from '../customers/customer-access.service';
 import { AlertsService } from './alerts.service';
@@ -33,7 +36,58 @@ export class SubscriptionsService {
     private readonly settings: SettingsService,
     private readonly access: CustomerAccessService,
     private readonly alerts: AlertsService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  /**
+   * The customer's monthly charge from the next bill on; bills already made stay (agents: their
+   * own customers). A customer without a plan starts billing on the 1st of next month. A change
+   * made by an agent is notified to the office.
+   */
+  async setMonthlyCharge(customerId: string, input: SetMonthlyChargeRequest, actor: AuthUser) {
+    await this.access.assertCanAccess(actor, customerId);
+    const customer = await this.db.selectFrom('customers').select(['customerCode', 'name', 'deletedAt']).where('id', '=', customerId).executeTakeFirstOrThrow();
+    if (customer.deletedAt) throw conflict('CUSTOMER_DELETED', 'This customer is deleted; restore it first');
+    const live = await this.db
+      .selectFrom('customerSubscriptions')
+      .selectAll()
+      .where('customerId', '=', customerId)
+      .where('status', '!=', 'ENDED')
+      .orderBy('createdAt', 'desc')
+      .executeTakeFirst();
+    const reason = input.reason?.trim() || (actor.role === 'AGENT' ? 'Changed by the agent' : 'Monthly charge changed');
+    let before: string | null = null;
+    let from: string;
+    let result: Awaited<ReturnType<SubscriptionsService['describe']>>;
+    if (live) {
+      from = live.nextPeriodStart < live.startDate ? live.startDate : live.nextPeriodStart;
+      before = await this.currentRate(this.db, live.id, from);
+      if (before !== null && toPaise(before) === toPaise(input.monthlyRate)) return this.describe(this.db, live.id);
+      result = await this.changeRate(live.id, { monthlyRate: input.monthlyRate, effectiveFrom: from, reason }, actor);
+    } else {
+      from = addMonths(`${businessDateOf(new Date()).slice(0, 7)}-01`, 1);
+      result = await this.create(
+        customerId,
+        { monthlyRate: input.monthlyRate, startDate: from, billingIntervalMonths: 1, billingTiming: 'ADVANCE', billingMode: 'AUTO', notes: null },
+        actor,
+      );
+    }
+    if (actor.role === 'AGENT') {
+      const admins = await this.db.selectFrom('users').select('id').where('role', 'in', ['ADMIN', 'SUPER_ADMIN']).where('status', '=', 'ACTIVE').where('deletedAt', 'is', null).execute();
+      const who = await this.db.selectFrom('users').select('fullName').where('id', '=', actor.id).executeTakeFirst();
+      await this.notifications.notify(
+        this.db,
+        admins.map((u) => u.id),
+        {
+          type: 'RATE_CHANGED_BY_AGENT',
+          title: 'Monthly charge changed by agent',
+          body: `${who?.fullName ?? 'Agent'} set ${customer.name} (${customer.customerCode}) to ₹${fromPaise(toPaise(input.monthlyRate))}/month from ${from}${before !== null ? ` (was ₹${fromPaise(toPaise(before))})` : ''}: ${reason}`,
+          data: { customerId },
+        },
+      );
+    }
+    return result;
+  }
 
   /** Live subscription with rate history, suspensions and the next billing preview. */
   async getForCustomer(customerId: string, user: AuthUser) {

@@ -2,12 +2,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { provisionalRef as provisionalRefSchema, type SyncCustomer, type SyncOpOutcome, type SyncPullResponse, type SyncPushRequest, type SyncSnapshot } from '@cablenet/contracts';
 import { describe, expect, it } from 'vitest';
-import { acknowledge, completeFollowUp, provisionalRef, recordPayment, recordVisit } from './actions';
+import { acknowledge, cancelPayment, completeFollowUp, provisionalRef, recordPayment, recordVisit } from './actions';
 import { MemoryKV } from './kv';
 import { SqlDb, SqliteKV } from './kv-sqlite';
 import { LocalStore } from './store';
 import { backoffMs, SyncEngine, Transport } from './sync-engine';
-import { buildList, counts, isStale, unsentToday } from './view';
+import { buildList, counts, deletedPayments, isStale, search, unsentToday } from './view';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -18,13 +18,18 @@ const customer = (over: Partial<SyncCustomer> = {}): SyncCustomer => ({
   customerCode: '500100',
   name: 'Test Customer',
   mobile: '9876543210',
+  altMobile: null,
   addressLine: '1, Test Society',
   landmark: null,
   society: 'Test Society',
+  notes: null,
+  stbNumbers: [],
+  mqNumbers: [],
   status: 'ACTIVE',
   assignment: 'PRIMARY',
   temporaryUntil: null,
   monthlyRate: '400.00',
+  upcomingRate: null,
   outstanding: '1200.00',
   advance: '0.00',
   oldestDueDate: '2026-09-11',
@@ -38,6 +43,7 @@ const customer = (over: Partial<SyncCustomer> = {}): SyncCustomer => ({
   lastVisitOutcome: null,
   recentPayments: [],
   recentVisits: [],
+  bills: [],
   ...over,
 });
 
@@ -327,6 +333,43 @@ describe('screens derived from snapshot + unsent entries', () => {
     expect(by['500103']!.todayStatus).toBe('PENDING');
     expect(counts(items)).toMatchObject({ all: 4, paid: 1, partial: 1, pending: 2, overdue: 4 });
     expect(unsentToday(store.getOps(), store.getHeader(), NOON)).toEqual({ count: 2, amount: '800.00' });
+  });
+
+  it('a payment deleted on the phone no longer counts as collected; the deletion is sent after it', async () => {
+    const { store, server, engine } = await setup();
+    const c = customer({ outstanding: '400.00' });
+    await store.replaceSnapshot(snapshot([c]), 'u1', NOON.toISOString());
+    server.snap = snapshot([c]);
+    const pay = await recordPayment(store, actor, { customer: c, amount: '400', mode: 'CASH', reference: null, notes: null, offline: true, now: NOON, newId: randomUUID });
+    const del = await cancelPayment(store, actor, { customer: c, paymentOpId: pay.opId, paymentId: null, amount: '400', reason: 'Wrong customer', offline: true, now: NOON, newId: randomUUID });
+    expect(deletedPayments(store.getOps()).has(pay.opId)).toBe(true);
+    const [item] = buildList(store.getCustomers(), store.getHeader(), store.getOps(), [], NOON);
+    expect(item).toMatchObject({ unsentAmount: null, todayStatus: 'PENDING' });
+    expect(unsentToday(store.getOps(), store.getHeader(), NOON)).toEqual({ count: 0, amount: '0.00' });
+    expect(del).toMatchObject({ type: 'PAYMENT_CANCEL', payload: { paymentOpId: pay.opId, reason: 'Wrong customer' }, label: { customerId: c.id, amount: '400' } });
+    expect(del.seq).toBeGreaterThan(pay.seq);
+    await engine.sync();
+    expect(store.getOps().map((o) => [o.type, o.state])).toEqual([
+      ['PAYMENT_CREATE', 'APPLIED'],
+      ['PAYMENT_CANCEL', 'APPLIED'],
+    ]);
+  });
+
+  it('finds customers by name, Customer ID, mobile, STB and MQ number (best match first)', async () => {
+    const { store } = await setup();
+    const a = customer({ customerCode: '1024', name: 'Ramesh Patel', stbNumbers: ['307070260701024'], mqNumbers: ['91081142'], mobile: '9898012345' });
+    const b = customer({ customerCode: '210', name: 'Suresh Shah', stbNumbers: ['307070260700210'], mqNumbers: ['91081999'], addressLine: 'B-402 Sunshine' });
+    await store.replaceSnapshot(snapshot([a, b]), 'u1', NOON.toISOString());
+    const items = buildList(store.getCustomers(), store.getHeader(), store.getOps(), [], NOON);
+    const codes = (q: string) => search(items, q).map((i) => i.customerCode);
+    expect(codes('91081142')).toEqual(['1024']); // MQ
+    expect(codes('0700210')).toEqual(['210']); // part of the STB
+    expect(codes('307070260701024')).toEqual(['1024']); // full STB
+    expect(codes('210')[0]).toBe('210'); // exact ID before other matches
+    expect(codes('ramesh')).toEqual(['1024']);
+    expect(codes('suresh 402')).toEqual(['210']); // every word must match
+    expect(codes('12345')).toEqual(['1024']); // mobile
+    expect(codes('nobody')).toEqual([]);
   });
 
   it('once sent and downloaded again, the snapshot is the only source', async () => {
