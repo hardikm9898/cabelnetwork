@@ -15,6 +15,10 @@
  *                                              checks, dry run and reconciliation). Without --commit it only
  *                                              reports and saves nothing. "-" reads the workbook from stdin.
  *                                              --by: the super admin recorded as importer (default: the first)
+ *   bill-from <YYYY-MM-01> [--by <mobile>] [--commit]
+ *                                              start billing every customer from that month at their own
+ *                                              monthly charge (only customers not billed yet), then bill
+ *                                              every month up to today. Without --commit it only reports.
  */
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -29,6 +33,7 @@ import { pendingMigrations, runMigrations } from './db/migrator';
 import { AppModule } from './app.module';
 import { loadConfig } from './config/env';
 import { hashPassword } from './modules/auth/passwords';
+import { BackdateService } from './modules/finance/backdate.service';
 import { JobsService } from './modules/finance/jobs.service';
 import { ReconciliationService } from './modules/finance/reconciliation.service';
 import { ImportsService } from './modules/imports/imports.service';
@@ -196,8 +201,56 @@ async function main(): Promise<void> {
       }
       return;
     }
+    case 'bill-from': {
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { by: { type: 'string' }, commit: { type: 'boolean', default: false } } });
+      const from = positionals[0];
+      if (!from) throw new Error('Usage: bill-from <YYYY-MM-01> [--by <mobile>] [--commit]');
+      const cfg = { ...loadConfig(), JOBS_ENABLED: false, LOG_LEVEL: 'warn' as const };
+      const ctx = await NestFactory.createApplicationContext(AppModule.forRoot(cfg), { logger: ['error', 'warn'] });
+      try {
+        const db = ctx.get<Database>(DATABASE);
+        const by = values.by ? normalizeIndianMobile(values.by) : null;
+        if (values.by && !by?.valid) throw new Error('--by must be a 10-digit mobile number');
+        let q = db.selectFrom('users').select(['id', 'fullName', 'role']).where('role', '=', 'SUPER_ADMIN').where('status', '=', 'ACTIVE').where('deletedAt', 'is', null);
+        if (by) q = q.where('mobile', '=', by.normalized);
+        const admin = await q.orderBy('createdAt').executeTakeFirst();
+        if (!admin) throw new Error('No active super admin');
+        const actor: AuthUser = { id: admin.id, role: admin.role, fullName: admin.fullName, sessionId: randomUUID(), deviceId: null, mustChangePassword: false };
+        const svc = ctx.get(BackdateService);
+        const rupees = (v: string) => `Rs ${Number(v).toLocaleString('en-IN')}`;
+        const plan = await svc.plan(from);
+        console.log(`\nBilling from ${plan.from} (today ${plan.today})`);
+        console.log(`  customers to bill from ${plan.from}: ${plan.change.length}`);
+        console.log(`  bills to raise up to today: ${plan.totalPeriods}, total ${rupees(plan.totalAmount)}`);
+        const byRate = new Map<string, number>();
+        for (const r of plan.change) byRate.set(r.monthlyRate ?? '-', (byRate.get(r.monthlyRate ?? '-') ?? 0) + 1);
+        for (const [rate, n] of [...byRate].sort((a, b) => Number(a[0]) - Number(b[0]))) console.log(`    ${String(n).padStart(4)} customers at ${rupees(rate)}/month`);
+        if (plan.skipped.length) {
+          console.log(`\n  not changed: ${plan.skipped.length}`);
+          for (const s of plan.skipped) console.log(`    ${s.customerCode} ${s.name}: ${s.reason}`);
+        }
+        if (plan.noCharge.length) {
+          console.log(`\n  NOT BILLED, no monthly charge set (${plan.noCharge.length}); set the charge in the office site, then run this again:`);
+          for (const s of plan.noCharge) console.log(`    ${s.customerCode} ${s.name}`);
+        }
+        if (!values.commit) {
+          console.log('\nDry run: nothing changed. Run again with --commit to apply.');
+          return;
+        }
+        const res = await requestContext.run({ requestId: randomUUID(), ip: null, userAgent: 'cli bill-from', user: actor }, () => svc.apply(from, actor));
+        console.log(`\nDone: ${res.plan.change.length} customers now billed from ${from}; ${res.run.invoicesCreated} bills raised, ${res.run.periodsSkipped} skipped (suspended).`);
+        if (res.run.errors.length) {
+          console.log(`ERRORS: ${res.run.errors.length}`);
+          for (const e of res.run.errors) console.log(`  ${e.subscriptionId}: ${e.message}`);
+          process.exitCode = 1;
+        }
+      } finally {
+        await ctx.close();
+      }
+      return;
+    }
     default:
-      throw new Error(`Unknown command "${command ?? ''}". Commands: migrate, create-super-admin, reset-password, run-jobs, verify-db, import-customers`);
+      throw new Error(`Unknown command "${command ?? ''}". Commands: migrate, create-super-admin, reset-password, run-jobs, verify-db, import-customers, bill-from`);
   }
 }
 

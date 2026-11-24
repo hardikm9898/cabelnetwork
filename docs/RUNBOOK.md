@@ -54,6 +54,13 @@ Phones and the office site reach only `https://<SITE_ADDRESS>`. Ports 80 and 443
    ```
 
    Back up first (§4.2). Delete the workbook from the server afterwards: it holds customer data.
+
+   **Start billing from an earlier month** (owner's decision 2026-11-24: everyone from January 2026). Customers not billed yet are moved to that month at their own monthly charge, and every month up to today is billed. Customers without a monthly charge are listed and not billed; set their charge, then run it again (safe to repeat):
+
+   ```bash
+   $C exec -T api node apps/api/dist/src/cli.js bill-from 2026-01-01            # report only
+   $C exec -T api node apps/api/dist/src/cli.js bill-from 2026-01-01 --commit   # apply
+   ```
 7. **Agent phones:**
    - Install the release build (`eas build --profile production`). `apps/agent/eas.json` must contain the real `https://` address; release builds refuse plain `http`.
    - Each agent signs in, replaces the temporary password and sets a PIN.

@@ -40,6 +40,7 @@ import { PaymentsService } from './modules/finance/payments.service';
 import { ReceiptsService } from './modules/finance/receipts.service';
 import { ReconciliationService } from './modules/finance/reconciliation.service';
 import { SubscriptionsService } from './modules/finance/subscriptions.service';
+import { BackdateService } from './modules/finance/backdate.service';
 import { FieldOpsController } from './modules/fieldops/fieldops.controller';
 import { FieldOpsService } from './modules/fieldops/fieldops.service';
 import { DashboardService } from './modules/reports/dashboard.service';
@@ -127,6 +128,7 @@ export class AppModule {
         AlertsService,
         ReceiptsService,
         SubscriptionsService,
+        BackdateService,
         BillingService,
         PaymentsService,
         CreditsService,
