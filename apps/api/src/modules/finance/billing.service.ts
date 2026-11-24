@@ -1,11 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { sql } from 'kysely';
-import type { ListInvoicesQuery, ManualInvoiceRequest } from '@cablenet/contracts';
+import type { ListInvoicesQuery, ManualInvoiceRequest, RebillRequest } from '@cablenet/contracts';
 import {
   addMonths,
   BillingPeriod,
   businessDateOf,
   duePeriods,
+  firstPeriodStart,
   fromPaise,
   Paise,
   periodAt,
@@ -232,6 +233,74 @@ export class BillingService {
       await this.ledger.allocate(trx, sub.customerId, actorId);
     }
     return invoice.id;
+  }
+
+  /**
+   * Changes the monthly charge from a month in the past, months already billed included: the bills
+   * from that month on are cancelled (reasons kept), later rates are replaced by the new charge,
+   * billing restarts at that month and the months are billed again at once. Money already paid
+   * on the cancelled bills is applied to the new ones, oldest first. Also restarts billing for
+   * months whose bills were cancelled by hand.
+   */
+  async rebill(subscriptionId: string, input: RebillRequest, actor: AuthUser) {
+    const today = businessDateOf(new Date());
+    const prepared = await this.db.transaction().execute(async (trx) => {
+      const head = await trx.selectFrom('customerSubscriptions').select('customerId').where('id', '=', subscriptionId).executeTakeFirst();
+      if (!head) throw notFound('SUBSCRIPTION_NOT_FOUND', 'Subscription not found');
+      await this.ledger.lockCustomer(trx, head.customerId);
+      const sub = await this.subscriptions.lock(trx, subscriptionId);
+      if (sub.status === 'ENDED') throw conflict('SUBSCRIPTION_ENDED', 'Billing has ended for this customer; start billing again first');
+      if (input.effectiveFrom > today) throw unprocessable('USE_CHANGE_RATE', 'For a future month use "Change rate"');
+      const from = firstPeriodStart(input.effectiveFrom, sub.billingAnchorDay);
+      const start = from < sub.startDate ? from : sub.startDate;
+      const bills = await trx
+        .selectFrom('invoices')
+        .selectAll()
+        .where('subscriptionId', '=', subscriptionId)
+        .where('kind', '=', 'SUBSCRIPTION')
+        .where('status', '!=', 'CANCELLED')
+        .where('periodStart', '>=', from)
+        .orderBy('periodStart')
+        .execute();
+      const why = `Re-billed at ₹${fromPaise(toPaise(input.monthlyRate))}/month from ${from}: ${input.reason}`;
+      for (const inv of bills) {
+        await assertWithinApprovalLimit(trx, this.settings, actor, inv.customerId, inv.total);
+        await this.ledger.reverse(trx, { invoiceId: inv.id }, today, `Invoice ${inv.invoiceNumber} cancelled: ${why}`, actor.id);
+        await this.ledger.releaseAllocations(trx, { invoiceId: inv.id }, actor.id);
+        await trx
+          .updateTable('invoices')
+          .set({ status: 'CANCELLED', amountPaid: '0.00', cancelledAt: sql<Date>`now()`, cancelledBy: actor.id, cancelReason: why })
+          .where('id', '=', inv.id)
+          .execute();
+      }
+      // From `from` on there is one charge: the new one (nothing is billed from then any more).
+      const before = await trx.selectFrom('subscriptionRates').select(['monthlyRate', 'effectiveFrom']).where('subscriptionId', '=', subscriptionId).orderBy('effectiveFrom').execute();
+      await sql`SELECT set_config('cablenet.replace_unbilled_rate', 'on', true)`.execute(trx);
+      await trx.deleteFrom('subscriptionRates').where('subscriptionId', '=', subscriptionId).where('effectiveFrom', '>=', from).execute();
+      await sql`SELECT set_config('cablenet.replace_unbilled_rate', 'off', true)`.execute(trx);
+      await trx.insertInto('subscriptionRates').values({ subscriptionId, monthlyRate: input.monthlyRate, effectiveFrom: from, reason: input.reason, createdBy: actor.id }).execute();
+      await trx
+        .updateTable('customerSubscriptions')
+        .set({ startDate: start, nextPeriodStart: from < sub.nextPeriodStart ? from : sub.nextPeriodStart, updatedBy: actor.id })
+        .where('id', '=', subscriptionId)
+        .execute();
+      await this.alerts.resolveOpen(trx, 'NO_RATE_FOR_PERIOD', subscriptionId, 'Rate added', actor.id);
+      await this.audit.record(trx, {
+        action: 'subscription.rebilled',
+        entityType: 'subscription',
+        entityId: subscriptionId,
+        before: { rates: before, cancelledBills: bills.map((b) => ({ number: b.invoiceNumber, periodStart: b.periodStart, total: b.total })) },
+        after: { monthlyRate: input.monthlyRate, effectiveFrom: from, startDate: start },
+        reason: input.reason,
+      });
+      return { customerId: sub.customerId, cancelled: bills.length, from };
+    });
+    const billed = await this.billSubscription(subscriptionId, today, null, actor.id);
+    await this.db.transaction().execute(async (trx) => {
+      await this.ledger.lockCustomer(trx, prepared.customerId);
+      await this.ledger.allocate(trx, prepared.customerId, actor.id);
+    });
+    return { from: prepared.from, cancelled: prepared.cancelled, created: billed.created, subscription: await this.subscriptions.describe(this.db, subscriptionId) };
   }
 
   /** Manual invoice for a MANUAL-mode subscription (admin chooses the period). */

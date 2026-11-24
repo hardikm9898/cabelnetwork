@@ -308,6 +308,22 @@ test.describe.serial('admin web', () => {
     await expect(page.getByText('Payment deleted').first()).toBeVisible();
   });
 
+  test('re-bill from a month: bills already made are raised again at the new charge', async ({ page }) => {
+    await signIn(page);
+    await expect(page.getByTestId('kpis')).toBeVisible();
+    const id = await sqlValue(`SELECT id::text AS v FROM customers WHERE name = 'Demo Customer 7'`);
+    await page.goto(`/customers/${id}`);
+    await page.getByRole('button', { name: 'Re-bill from a month' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Re-bill from a month' });
+    await dialog.getByLabel('From month').fill(monthStart(-3).slice(0, 7));
+    await dialog.getByLabel('Monthly charge').fill('275');
+    await dialog.getByLabel('Reason').fill('Agreed rate is 275');
+    await dialog.getByRole('button', { name: /Save|Confirm|Re-bill/ }).last().click();
+    await expect(page.getByText(/bill\(s\) raised from/).first()).toBeVisible();
+    await page.getByRole('tab', { name: 'Bills' }).click();
+    await expect(page.locator('tbody').getByText('₹275.00').first()).toBeVisible();
+  });
+
   test('Excel import: check, correct, dry run, approve, import, then see the Excel history', async ({ page }) => {
     const year = new Date().getUTCFullYear() - 1;
     const c = (code: string, rate: number | string) => ({ code, name: `Import ${code}`, address: `${code} Import Nagar`, mobile: Number(`97${code}00`), rate, stb: `XLSTB${code}`, society: 'IMPORT NAGAR' });

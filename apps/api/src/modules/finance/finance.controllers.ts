@@ -36,6 +36,8 @@ import {
   refundRequest,
   RefundRequest,
   reverseCreditRequest,
+  rebillRequest,
+  RebillRequest,
   reversePaymentRequest,
   setMonthlyChargeRequest,
   SetMonthlyChargeRequest,
@@ -190,7 +192,19 @@ export class CustomerFinanceController {
 @ApiBearerAuth()
 @Controller('subscriptions/:id')
 export class SubscriptionsController {
-  constructor(private readonly subscriptions: SubscriptionsService) {}
+  constructor(
+    private readonly subscriptions: SubscriptionsService,
+    private readonly billing: BillingService,
+  ) {}
+
+  /** New monthly charge from a past month, bills already made included (cancelled and raised again). */
+  @RequirePermissions('billing:manage')
+  @Idempotent()
+  @Post('rebill')
+  @HttpCode(200)
+  rebill(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(rebillRequest) body: RebillRequest) {
+    return this.billing.rebill(id, body, user);
+  }
 
   @RequirePermissions('billing:manage')
   @Post('rates')

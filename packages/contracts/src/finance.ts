@@ -49,6 +49,13 @@ export type ChangeRateRequest = z.infer<typeof changeRateRequest>;
  * The customer's monthly charge from the next bill on (bills already made stay). A customer
  * without a plan starts billing on the 1st of next month at this charge.
  */
+/**
+ * New monthly charge from a month in the past, including months already billed: those bills are
+ * cancelled and raised again at the new charge (payments on them are applied again, oldest first).
+ */
+export const rebillRequest = z.object({ effectiveFrom: businessDate, monthlyRate: nonNegativeMoney, reason });
+export type RebillRequest = z.infer<typeof rebillRequest>;
+
 export const setMonthlyChargeRequest = z.object({ monthlyRate: nonNegativeMoney, reason: optionalTrimmed(300) });
 export type SetMonthlyChargeRequest = z.infer<typeof setMonthlyChargeRequest>;
 

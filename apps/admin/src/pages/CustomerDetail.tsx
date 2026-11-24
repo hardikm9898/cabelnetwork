@@ -101,6 +101,7 @@ type Dialog =
   | 'agent'
   | 'subscription'
   | 'rate'
+  | 'rebill'
   | 'terms'
   | 'suspend'
   | 'resume'
@@ -316,6 +317,9 @@ export default function CustomerDetailPage() {
                 <>
                   <Button size="sm" variant="secondary" onClick={() => setDialog('rate')}>
                     Change rate
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setDialog('rebill')}>
+                    Re-bill from a month
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => setDialog('terms')}>
                     Terms
@@ -1320,6 +1324,35 @@ function SubscriptionDialogs({ which, onClose, customerId, sub, onSaved }: { whi
                 <Field label="New monthly rate" required>{(id) => <MoneyInput id={id} value={v('monthlyRate')} onChange={(x) => set('monthlyRate', x)} autoFocus />}</Field>
                 <Field label="From" error={err.effectiveFrom}>{(id) => <Input id={id} type="date" value={v('effectiveFrom', sub.nextBilling?.start ?? today())} onChange={(e) => set('effectiveFrom', e.target.value)} />}</Field>
                 <Field label="Reason" required>{(id) => <Textarea id={id} value={v('reason')} onChange={(e) => set('reason', e.target.value)} />}</Field>
+              </>
+            )}
+          </ActionDialog>
+          <ActionDialog
+            open={which === 'rebill'}
+            onClose={closeAll}
+            title="Re-bill from a month"
+            submitLabel="Re-bill"
+            disabled={!v('monthlyRate', sub.monthlyRate ?? '') || !/^\d{4}-\d{2}$/.test(v('fromMonth', sub.startDate.slice(0, 7))) || v('reason').length < 3}
+            onSubmit={async (key) => {
+              const res = await api<{ cancelled: number; created: number; from: string }>('POST', `/subscriptions/${sub.id}/rebill`, {
+                body: { effectiveFrom: `${v('fromMonth', sub.startDate.slice(0, 7))}-01`, monthlyRate: v('monthlyRate', sub.monthlyRate ?? ''), reason: v('reason') },
+                idempotencyKey: key,
+              });
+              setF({});
+              await onSaved(`${res.created} bill(s) raised from ${date(res.from)} at the new charge${res.cancelled ? ` (${res.cancelled} old bill(s) cancelled)` : ''}`);
+            }}
+          >
+            {(err) => (
+              <>
+                <p className="text-sm text-muted">
+                  Use this to change the charge for months that are <strong>already billed</strong>, or to bill again months whose bills were cancelled. Every bill from the chosen month on is
+                  cancelled and raised again at the new charge, up to today; later months use it too. Money already paid is applied to the new bills, oldest month first.
+                </p>
+                <Field label="From month" error={err.effectiveFrom}>
+                  {(id) => <Input id={id} type="month" value={v('fromMonth', sub.startDate.slice(0, 7))} max={today().slice(0, 7)} onChange={(e) => set('fromMonth', e.target.value)} />}
+                </Field>
+                <Field label="Monthly charge" required>{(id) => <MoneyInput id={id} value={v('monthlyRate', sub.monthlyRate ?? '')} onChange={(x) => set('monthlyRate', x)} />}</Field>
+                <Field label="Reason" required>{(id) => <Textarea id={id} value={v('reason')} onChange={(e) => set('reason', e.target.value)} placeholder="e.g. Agreed rate is ₹300" />}</Field>
               </>
             )}
           </ActionDialog>
