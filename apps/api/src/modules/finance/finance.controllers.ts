@@ -336,6 +336,14 @@ export class PaymentsController {
 
   @RequirePermissions('credits:manage')
   @Idempotent()
+  @Post('refunds/:id/reverse')
+  @HttpCode(200)
+  reverseRefund(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(reverseCreditRequest) body: z.infer<typeof reverseCreditRequest>) {
+    return this.credits.reverseRefund(id, body.reason, user);
+  }
+
+  @RequirePermissions('credits:manage')
+  @Idempotent()
   @Post('credits/:id/reverse')
   @HttpCode(200)
   reverseCredit(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(reverseCreditRequest) body: z.infer<typeof reverseCreditRequest>) {

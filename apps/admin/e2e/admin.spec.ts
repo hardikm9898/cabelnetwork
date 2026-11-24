@@ -260,6 +260,54 @@ test.describe.serial('admin web', () => {
     await expect(page.getByText(/deleted the ₹123\.00 cash payment/).filter({ visible: true }).first()).toBeVisible();
   });
 
+  test('a test payment removed with a refund: delete the refund in the Ledger, then the payment; a discount can be reversed', async ({ page }) => {
+    const login = await fetch(`${state.apiBase}/api/v1/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mobile: state.adminMobile, password: state.adminPassword }) });
+    const token = ((await login.json()) as { data: { accessToken: string } }).data.accessToken;
+    const call = async (path: string, body: unknown) => {
+      const r = await fetch(`${state.apiBase}/api/v1${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() }, body: JSON.stringify(body) });
+      expect(r.status, await r.clone().text()).toBeLessThan(300);
+      return ((await r.json()) as { data: { id: string } }).data;
+    };
+    const list = await fetch(`${state.apiBase}/api/v1/customers?pageSize=5&balance=SETTLED`, { headers: { authorization: `Bearer ${token}` } });
+    const customer = ((await list.json()) as { data: { id: string }[] }).data[0]!;
+    const istToday = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+    await call('/payments', { clientTxnId: crypto.randomUUID(), customerId: customer.id, amount: '345', paymentDate: istToday, mode: 'CASH' });
+    await call(`/customers/${customer.id}/refunds`, { amount: '345', mode: 'CASH', reason: 'Remove test money' });
+    await call(`/customers/${customer.id}/credits`, { kind: 'CREDIT_ADJUSTMENT', amount: '55', reason: 'Goodwill' });
+
+    await signIn(page);
+    await expect(page.getByTestId('kpis')).toBeVisible();
+    await page.goto(`/customers/${customer.id}`);
+    // The payment cannot be deleted while it is refunded: the message says what to do.
+    await page.getByRole('tab', { name: 'Payments' }).click();
+    await page.getByRole('row').filter({ hasText: '₹345.00' }).getByRole('button', { name: 'Delete' }).click();
+    let dialog = page.getByRole('dialog', { name: /Delete/ });
+    await dialog.getByRole('button', { name: 'Test entry' }).click();
+    await dialog.getByRole('button', { name: 'Delete payment' }).click();
+    await expect(dialog.getByText(/Delete the refund first/)).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+    await page.getByRole('tab', { name: 'Ledger' }).click();
+    await page.getByRole('row').filter({ hasText: 'Refund' }).getByRole('button', { name: 'Delete' }).click();
+    dialog = page.getByRole('dialog', { name: /Delete refund/ });
+    await dialog.getByRole('button', { name: 'Test entry' }).click();
+    await dialog.getByRole('button', { name: 'Delete refund' }).click();
+    await expect(page.getByText('Refund deleted').first()).toBeVisible();
+    // The discount/credit Reverse button works too.
+    await page.getByRole('row').filter({ hasText: 'Credit adjustment' }).first().getByRole('button', { name: 'Reverse' }).click();
+    dialog = page.getByRole('dialog', { name: /Reverse discount/ });
+    await dialog.getByRole('button', { name: 'Entered by mistake' }).click();
+    await dialog.getByRole('button', { name: 'Reverse' }).click();
+    await expect(page.getByText('Credit reversed').first()).toBeVisible();
+
+    await page.getByRole('tab', { name: 'Payments' }).click();
+    await page.getByRole('row').filter({ hasText: '₹345.00' }).getByRole('button', { name: 'Delete' }).click();
+    dialog = page.getByRole('dialog', { name: /Delete/ });
+    await dialog.getByRole('button', { name: 'Test entry' }).click();
+    await dialog.getByRole('button', { name: 'Delete payment' }).click();
+    await expect(page.getByText('Payment deleted').first()).toBeVisible();
+  });
+
   test('Excel import: check, correct, dry run, approve, import, then see the Excel history', async ({ page }) => {
     const year = new Date().getUTCFullYear() - 1;
     const c = (code: string, rate: number | string) => ({ code, name: `Import ${code}`, address: `${code} Import Nagar`, mobile: Number(`97${code}00`), rate, stb: `XLSTB${code}`, society: 'IMPORT NAGAR' });

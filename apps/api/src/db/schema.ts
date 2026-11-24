@@ -436,6 +436,14 @@ export interface AllocationsTable {
   createdBy: string | null;
 }
 
+export interface RefundReversalsTable {
+  id: Generated<string>;
+  refundId: string;
+  reason: string;
+  approvedBy: string;
+  createdAt: Generated<Date>;
+}
+
 export interface PaymentReversalsTable {
   id: Generated<string>;
   paymentId: string;
@@ -720,6 +728,7 @@ export interface DB {
   refunds: RefundsTable;
   allocations: AllocationsTable;
   paymentReversals: PaymentReversalsTable;
+  refundReversals: RefundReversalsTable;
   receipts: ReceiptsTable;
   ledgerEntries: LedgerEntriesTable;
   customerBalances: CustomerBalancesView;

@@ -80,6 +80,7 @@ export class LedgerQueriesService {
         'c.creditNumber',
         'e.creditNoteId',
         'r.refundNumber',
+        'e.refundId',
       ])
       .where('e.customerId', '=', customerId)
       .orderBy('e.entryDate')

@@ -199,6 +199,27 @@ export class CreditsService {
   }
 
   /**
+   * Deletes a refund entered by mistake: its ledger entry is reversed and the advance it used is
+   * available again (and goes to open bills). Kept in history with the reason.
+   */
+  async reverseRefund(refundId: string, reason: string, actor: AuthUser) {
+    return this.db.transaction().execute(async (trx) => {
+      const head = await trx.selectFrom('refunds').select('customerId').where('id', '=', refundId).executeTakeFirst();
+      if (!head) throw notFound('REFUND_NOT_FOUND', 'Refund not found');
+      await this.ledger.lockCustomer(trx, head.customerId);
+      const refund = await trx.selectFrom('refunds').selectAll().where('id', '=', refundId).executeTakeFirstOrThrow();
+      const done = await trx.selectFrom('refundReversals').select('id').where('refundId', '=', refundId).executeTakeFirst();
+      if (done) throw conflict('REFUND_ALREADY_REVERSED', 'This refund was already deleted');
+      await trx.insertInto('refundReversals').values({ refundId, reason, approvedBy: actor.id }).execute();
+      await this.ledger.reverse(trx, { refundId }, businessDateOf(new Date()), `Refund ${refund.refundNumber} deleted: ${reason}`, actor.id);
+      await this.ledger.releaseAllocations(trx, { refundId }, actor.id);
+      await this.ledger.allocate(trx, refund.customerId, actor.id);
+      await this.audit.record(trx, { action: 'refund.reversed', entityType: 'refund', entityId: refundId, before: { amount: refund.amount }, after: { status: 'REVERSED' }, reason });
+      return { id: refundId, status: 'REVERSED', balance: await this.ledger.summary(trx, refund.customerId) };
+    });
+  }
+
+  /**
    * One-time balance brought forward from the old system (positive = due, negative = advance).
    * Never imported as a "payment" (EXCEL_MIGRATION_MAPPING §6.2).
    */

@@ -96,7 +96,7 @@ export class LedgerService {
   /** Posts the exact opposite of an earlier entry (found by document reference). */
   async reverse(
     trx: Database,
-    ref: { invoiceId?: string; paymentId?: string; creditNoteId?: string },
+    ref: { invoiceId?: string; paymentId?: string; creditNoteId?: string; refundId?: string },
     entryDate: string,
     description: string,
     createdBy: string,
@@ -109,6 +109,7 @@ export class LedgerService {
     if (ref.invoiceId) q = q.where('e.invoiceId', '=', ref.invoiceId);
     if (ref.paymentId) q = q.where('e.paymentId', '=', ref.paymentId);
     if (ref.creditNoteId) q = q.where('e.creditNoteId', '=', ref.creditNoteId);
+    if (ref.refundId) q = q.where('e.refundId', '=', ref.refundId);
     const entries = await q.execute();
     for (const e of entries) {
       await this.post(trx, {
@@ -265,11 +266,11 @@ export class LedgerService {
    */
   async releaseAllocations(
     trx: Database,
-    filter: { paymentId?: string; creditNoteId?: string; invoiceId?: string },
+    filter: { paymentId?: string; creditNoteId?: string; invoiceId?: string; refundId?: string },
     actorId: string,
   ): Promise<string[]> {
-    const col = filter.paymentId ? 'payment_id' : filter.creditNoteId ? 'credit_note_id' : 'invoice_id';
-    const value = filter.paymentId ?? filter.creditNoteId ?? filter.invoiceId;
+    const col = filter.paymentId ? 'payment_id' : filter.creditNoteId ? 'credit_note_id' : filter.refundId ? 'refund_id' : 'invoice_id';
+    const value = filter.paymentId ?? filter.creditNoteId ?? filter.refundId ?? filter.invoiceId;
     const res = await sql<{ invoiceId: string | null }>`
       INSERT INTO allocations (customer_id, payment_id, credit_note_id, invoice_id, refund_id, amount, reverses_allocation_id, created_by)
       SELECT a.customer_id, a.payment_id, a.credit_note_id, a.invoice_id, a.refund_id, -a.amount, a.id, ${actorId}

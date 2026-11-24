@@ -688,10 +688,11 @@ function LedgerTab({ customerId }: { customerId: string }) {
   const { can } = useAuth();
   const qc = useQueryClient();
   const [reverse, setReverse] = useState<{ creditNoteId: string; description: string } | null>(null);
+  const [delRefund, setDelRefund] = useState<{ refundId: string; description: string; amount: string } | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ['customer', customerId, 'ledger'],
     queryFn: () =>
-      api<{ entries: { id: string; entryDate: string; type: string; description: string; debit: string | null; credit: string | null; runningBalance: string; creditNoteId: string | null; reversesEntryId: string | null }[] }>(
+      api<{ entries: { id: string; entryDate: string; type: string; description: string; debit: string | null; credit: string | null; runningBalance: string; creditNoteId: string | null; refundId: string | null; reversesEntryId: string | null }[] }>(
         'GET',
         `/customers/${customerId}/ledger`,
       ),
@@ -721,15 +722,23 @@ function LedgerTab({ customerId }: { customerId: string }) {
           {
             key: 'x',
             header: '',
-            cell: (r) =>
-              can('credits:manage') &&
-              r.creditNoteId &&
-              !r.reversesEntryId &&
-              !data?.entries.some((x) => x.reversesEntryId === r.id) && (
-                <Button size="sm" variant="ghost" onClick={() => setReverse({ creditNoteId: r.creditNoteId!, description: r.description })}>
-                  Reverse
-                </Button>
-              ),
+            cell: (r) => {
+              if (!can('credits:manage') || r.reversesEntryId || data?.entries.some((x) => x.reversesEntryId === r.id)) return null;
+              if (r.type === 'REFUND' && r.refundId) {
+                return (
+                  <Button size="sm" variant="ghost" className="text-red-700" onClick={() => setDelRefund({ refundId: r.refundId!, description: r.description, amount: r.debit ?? '0' })}>
+                    <Trash2 className="size-4" aria-hidden /> Delete
+                  </Button>
+                );
+              }
+              return (
+                r.creditNoteId && (
+                  <Button size="sm" variant="ghost" onClick={() => setReverse({ creditNoteId: r.creditNoteId!, description: r.description })}>
+                    Reverse
+                  </Button>
+                )
+              );
+            },
           },
         ]}
       />
@@ -742,9 +751,23 @@ function LedgerTab({ customerId }: { customerId: string }) {
         confirmLabel="Reverse"
         danger
         presets={['Entered by mistake', 'Wrong amount']}
-        onConfirm={async (reason) => {
-          await api('POST', `/credits/${reverse!.creditNoteId}/reverse`, { body: { reason } });
+        onConfirm={async (reason, key) => {
+          await api('POST', `/credits/${reverse!.creditNoteId}/reverse`, { body: { reason }, idempotencyKey: key });
           toast('Credit reversed');
+          await qc.invalidateQueries({ predicate: (q) => JSON.stringify(q.queryKey).includes(customerId) });
+        }}
+      />
+      <ReasonDialog
+        open={!!delRefund}
+        onClose={() => setDelRefund(null)}
+        title={`Delete refund of ${delRefund ? inr(delRefund.amount) : ''}`}
+        description={`${delRefund?.description ?? ''}. Use this when the money was not really given back. The amount becomes the customer's advance again (or pays open bills); both entries stay in the statement.`}
+        confirmLabel="Delete refund"
+        danger
+        presets={['Test entry', 'Entered by mistake', 'Wrong amount']}
+        onConfirm={async (reason, key) => {
+          await api('POST', `/refunds/${delRefund!.refundId}/reverse`, { body: { reason }, idempotencyKey: key });
+          toast('Refund deleted');
           await qc.invalidateQueries({ predicate: (q) => JSON.stringify(q.queryKey).includes(customerId) });
         }}
       />

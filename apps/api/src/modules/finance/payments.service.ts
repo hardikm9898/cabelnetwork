@@ -267,13 +267,15 @@ export class PaymentsService {
     if (inPending) {
       throw conflict('PAYMENT_IN_PENDING_HANDOVER', `Confirm or reject cash handover ${inPending.handoverNumber} first`);
     }
-    const refunded = await trx
-      .selectFrom('allocations')
-      .select(sql<string>`coalesce(sum(amount), 0)`.as('n'))
-      .where('paymentId', '=', id)
-      .where('refundId', 'is not', null)
-      .executeTakeFirstOrThrow();
-    if (toPaise(refunded.n) > 0n) throw conflict('PAYMENT_REFUNDED', 'Part of this payment was refunded; it cannot be reversed');
+    const refunded = await sql<{ refundNumber: string; amount: string }>`
+      SELECT r.refund_number, sum(a.amount) AS amount
+      FROM allocations a JOIN refunds r ON r.id = a.refund_id
+      WHERE a.payment_id = ${id}
+      GROUP BY r.refund_number HAVING sum(a.amount) > 0`.execute(trx);
+    if (refunded.rows.length > 0) {
+      const which = refunded.rows.map((r) => r.refundNumber).join(', ');
+      throw conflict('PAYMENT_REFUNDED', `This money was given back to the customer as refund ${which}. Delete the refund first (customer → Ledger tab), then delete the payment.`);
+    }
 
     const today = businessDateOf(new Date());
     await trx.insertInto('paymentReversals').values({ paymentId: id, reason, approvedBy: actor.id }).execute();
