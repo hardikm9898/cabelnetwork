@@ -50,6 +50,7 @@ export class CustomersService {
       .leftJoin('users as au', 'au.id', 'ca.agentId')
       .leftJoin('customerBalances as b', 'b.customerId', 'c.id');
 
+    q = query.deleted ? q.where('c.deletedAt', 'is not', null) : q.where('c.deletedAt', 'is', null);
     if (!canReadAllCustomers(user.role)) q = q.where('ca.agentId', '=', user.id);
     if (query.societyId) q = q.where('c.societyId', '=', query.societyId);
     if (query.areaId) q = q.where('s.areaId', '=', query.areaId);
@@ -117,6 +118,18 @@ export class CustomersService {
           'ca.kind as assignmentKind',
           sql<string>`coalesce(b.outstanding, 0)::numeric(12,2)`.as('outstanding'),
           sql<string>`coalesce(b.advance, 0)::numeric(12,2)`.as('advance'),
+          'c.deletedAt',
+          'c.pendingDecision',
+          // Monthly rate of the live subscription today (null: not billed). Before the first rate
+          // starts, the first upcoming rate is shown.
+          sql<string | null>`(
+            SELECT r.monthly_rate FROM customer_subscriptions cs
+            JOIN LATERAL (SELECT sr.monthly_rate FROM subscription_rates sr WHERE sr.subscription_id = cs.id
+                          ORDER BY (sr.effective_from <= current_date) DESC,
+                                   CASE WHEN sr.effective_from <= current_date THEN sr.effective_from END DESC,
+                                   sr.effective_from
+                          LIMIT 1) r ON TRUE
+            WHERE cs.customer_id = c.id AND cs.status <> 'ENDED' ORDER BY cs.start_date DESC LIMIT 1)`.as('monthlyRate'),
         ])
         .select((eb) =>
           eb
@@ -125,6 +138,14 @@ export class CustomersService {
             .whereRef('cc.customerId', '=', 'c.id')
             .where('cc.activeTo', 'is', null)
             .as('stbNumbers'),
+        )
+        .select((eb) =>
+          eb
+            .selectFrom('customerConnections as cc')
+            .select(sql<string>`string_agg(cc.mq_number, ', ' ORDER BY cc.active_from)`.as('mq'))
+            .whereRef('cc.customerId', '=', 'c.id')
+            .where('cc.activeTo', 'is', null)
+            .as('mqNumbers'),
         )
         .orderBy(col, dir)
         .orderBy('c.id')
@@ -222,6 +243,7 @@ export class CustomersService {
         .selectFrom('customers')
         .select('id')
         .where(sql<boolean>`lower(customer_code) = lower(${code})`)
+        .where('deletedAt', 'is', null)
         .executeTakeFirst();
       if (dup) throw conflict('CUSTOMER_CODE_EXISTS', `Customer ID ${code} already exists`);
 
@@ -303,6 +325,19 @@ export class CustomersService {
       }
       this.requireAcknowledgement(warnings, input.acknowledgeWarnings);
 
+      if (before.deletedAt) throw conflict('CUSTOMER_DELETED', 'This customer is deleted; restore it first');
+      if (input.customerCode !== undefined && input.customerCode.trim() !== before.customerCode) {
+        const code = input.customerCode.trim();
+        const dup = await trx
+          .selectFrom('customers')
+          .select('id')
+          .where(sql<boolean>`lower(customer_code) = lower(${code})`)
+          .where('deletedAt', 'is', null)
+          .where('id', '<>', id)
+          .executeTakeFirst();
+        if (dup) throw conflict('CUSTOMER_CODE_EXISTS', `Customer ID ${code} already exists`);
+        patch.customerCode = code;
+      }
       if (input.name !== undefined) patch.name = cleanText(input.name);
       if (input.addressLine !== undefined) patch.addressLine = cleanText(input.addressLine);
       if (input.landmark !== undefined) patch.landmark = input.landmark;
@@ -320,13 +355,16 @@ export class CustomersService {
       const changedKeys = Object.keys(patch).filter(
         (k) => JSON.stringify(patch[k]) !== JSON.stringify((before as Record<string, unknown>)[k]),
       );
-      if (changedKeys.length === 0) return { customer: await this.detail(trx, id), warnings };
+      const box = await this.correctConnection(trx, id, input, actor);
+      if (changedKeys.length === 0 && !box) return { customer: await this.detail(trx, id), warnings };
 
-      await trx
-        .updateTable('customers')
-        .set({ ...patch, updatedBy: actor.id })
-        .where('id', '=', id)
-        .execute();
+      if (changedKeys.length > 0) {
+        await trx
+          .updateTable('customers')
+          .set({ ...patch, updatedBy: actor.id })
+          .where('id', '=', id)
+          .execute();
+      }
 
       if (societyChanged) {
         const changes = await this.assignments.applyAreaDefault(trx, [id], actor.id, 'Customer moved to another society');
@@ -337,11 +375,160 @@ export class CustomersService {
         action: 'customer.update',
         entityType: 'customer',
         entityId: id,
-        before: Object.fromEntries(changedKeys.map((k) => [k, (before as Record<string, unknown>)[k]])),
-        after: Object.fromEntries(changedKeys.map((k) => [k, patch[k]])),
+        before: { ...Object.fromEntries(changedKeys.map((k) => [k, (before as Record<string, unknown>)[k]])), ...box?.before },
+        after: { ...Object.fromEntries(changedKeys.map((k) => [k, patch[k]])), ...box?.after },
         reason: input.reason ?? null,
       });
       return { customer: await this.detail(trx, id), warnings };
+    });
+  }
+
+  /**
+   * Corrects the set-top box number / MQ number typed for the customer (a typing mistake, not a
+   * box swap: the active connection is changed in place). Empty STB removes the box from today.
+   * Returns what changed, or null.
+   */
+  private async correctConnection(trx: Database, id: string, input: UpdateCustomerRequest, actor: AuthUser) {
+    if (input.stbNumber === undefined && input.mqNumber === undefined) return null;
+    const active = await trx
+      .selectFrom('customerConnections')
+      .selectAll()
+      .where('customerId', '=', id)
+      .where('activeTo', 'is', null)
+      .orderBy('activeFrom', 'desc')
+      .executeTakeFirst();
+    const stb = input.stbNumber === undefined ? (active?.stbNumber ?? null) : input.stbNumber?.trim().toUpperCase() || null;
+    const mq = input.mqNumber === undefined ? (active?.mqNumber ?? null) : input.mqNumber?.trim() || null;
+    if ((active?.stbNumber ?? null) === stb && (active?.mqNumber ?? null) === (stb ? mq : null)) return null;
+    const before = { stbNumber: active?.stbNumber ?? null, mqNumber: active?.mqNumber ?? null };
+    if (stb && stb !== active?.stbNumber) {
+      const inUse = await trx
+        .selectFrom('customerConnections as cc')
+        .innerJoin('customers as c', 'c.id', 'cc.customerId')
+        .select('c.customerCode')
+        .where(sql<boolean>`upper(cc.stb_number) = ${stb}`)
+        .where('cc.activeTo', 'is', null)
+        .where('cc.customerId', '<>', id)
+        .executeTakeFirst();
+      if (inUse) throw conflict('STB_IN_USE', `STB ${stb} is already on customer ${inUse.customerCode}`);
+    }
+    const today = businessDateOf(new Date());
+    if (!stb) {
+      if (active) {
+        await trx
+          .updateTable('customerConnections')
+          .set({ activeTo: active.activeFrom > today ? active.activeFrom : today })
+          .where('id', '=', active.id)
+          .execute();
+      }
+    } else if (active) {
+      await trx.updateTable('customerConnections').set({ stbNumber: stb, mqNumber: mq }).where('id', '=', active.id).execute();
+    } else {
+      await trx
+        .insertInto('customerConnections')
+        .values({ customerId: id, stbNumber: stb, mqNumber: mq, activeFrom: today, reason: 'Added by the office', createdBy: actor.id })
+        .execute();
+    }
+    return { before, after: { stbNumber: stb, mqNumber: stb ? mq : null } };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Delete (soft) and restore
+  // ---------------------------------------------------------------------------
+
+  /** Deletes one customer; refuses (with the reason) when money is still open. */
+  async remove(id: string, reason: string, actor: AuthUser) {
+    await this.db.transaction().execute((trx) => this.removeIn(trx, id, reason, actor));
+    return { ok: true };
+  }
+
+  /** Deletes many; each one on its own, so one refusal does not stop the others. */
+  async bulkRemove(ids: string[], reason: string, actor: AuthUser) {
+    const deletedCodes: string[] = [];
+    const blocked: { customerId: string; customerCode: string | null; reason: string }[] = [];
+    for (const id of [...new Set(ids)]) {
+      try {
+        deletedCodes.push(await this.db.transaction().execute((trx) => this.removeIn(trx, id, reason, actor)));
+      } catch (e) {
+        const row = await this.db.selectFrom('customers').select('customerCode').where('id', '=', id).executeTakeFirst();
+        blocked.push({ customerId: id, customerCode: row?.customerCode ?? null, reason: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return { deleted: deletedCodes.length, deletedCodes, blocked };
+  }
+
+  private async removeIn(trx: Database, id: string, reason: string, actor: AuthUser): Promise<string> {
+    const c = await trx.selectFrom('customers').selectAll().where('id', '=', id).forUpdate().executeTakeFirst();
+    if (!c) throw notFound('CUSTOMER_NOT_FOUND', 'Customer not found');
+    if (c.deletedAt) throw conflict('CUSTOMER_DELETED', `Customer ${c.customerCode} is already deleted`);
+    const [bal, pending] = await Promise.all([
+      trx.selectFrom('customerBalances').select('balance').where('customerId', '=', id).executeTakeFirst(),
+      trx.selectFrom('payments').select('id').where('customerId', '=', id).where('status', '=', 'PENDING_VERIFICATION').executeTakeFirst(),
+    ]);
+    const balance = Number(bal?.balance ?? 0);
+    if (balance > 0) {
+      throw conflict('CUSTOMER_HAS_DUES', `Customer ${c.customerCode} still owes Rs ${balance.toFixed(2)}: collect it or give a discount first (or deactivate the customer instead)`);
+    }
+    if (balance < 0) {
+      throw conflict('CUSTOMER_HAS_ADVANCE', `Customer ${c.customerCode} has Rs ${(-balance).toFixed(2)} advance: refund it first (or deactivate the customer instead)`);
+    }
+    if (pending) throw conflict('CUSTOMER_HAS_PENDING_PAYMENT', `Customer ${c.customerCode} has a payment waiting for verification`);
+
+    await this.subscriptions.endLiveForCustomer(trx, id, `Customer deleted: ${reason}`, actor);
+    const today = businessDateOf(new Date());
+    // Ends the boxes from today (or from their start, if later), so the numbers can be used again.
+    await trx
+      .updateTable('customerConnections')
+      .set({ activeTo: sql<string>`greatest(active_from, ${today}::date)` })
+      .where('customerId', '=', id)
+      .where('activeTo', 'is', null)
+      .execute();
+    await trx.updateTable('followUpTasks').set({ status: 'CANCELLED' }).where('customerId', '=', id).where('status', '=', 'OPEN').execute();
+    await trx
+      .updateTable('customers')
+      .set({
+        status: c.status === 'ACTIVE' || c.status === 'SUSPENDED' ? 'INACTIVE' : c.status,
+        statusReason: `Deleted: ${reason}`,
+        deactivatedAt: c.deactivatedAt ?? sql<Date>`now()`,
+        deletedAt: sql<Date>`now()`,
+        deletedBy: actor.id,
+        deleteReason: reason,
+        updatedBy: actor.id,
+      })
+      .where('id', '=', id)
+      .execute();
+    await this.audit.record(trx, {
+      action: 'customer.delete',
+      entityType: 'customer',
+      entityId: id,
+      before: { customerCode: c.customerCode, name: c.name, status: c.status },
+      reason,
+    });
+    return c.customerCode;
+  }
+
+  /** Brings a deleted customer back: inactive, without a box or billing (add those again). */
+  async restore(id: string, reason: string, actor: AuthUser) {
+    return this.db.transaction().execute(async (trx) => {
+      const c = await trx.selectFrom('customers').selectAll().where('id', '=', id).forUpdate().executeTakeFirst();
+      if (!c) throw notFound('CUSTOMER_NOT_FOUND', 'Customer not found');
+      if (!c.deletedAt) throw conflict('CUSTOMER_NOT_DELETED', 'This customer is not deleted');
+      const dup = await trx
+        .selectFrom('customers')
+        .select('id')
+        .where(sql<boolean>`lower(customer_code) = lower(${c.customerCode})`)
+        .where('deletedAt', 'is', null)
+        .executeTakeFirst();
+      if (dup) throw conflict('CUSTOMER_CODE_EXISTS', `Another customer now uses ID ${c.customerCode}; change that one first`);
+      await trx
+        .updateTable('customers')
+        .set({ deletedAt: null, deletedBy: null, deleteReason: null, statusReason: `Restored: ${reason}`, updatedBy: actor.id })
+        .where('id', '=', id)
+        .execute();
+      const changes = await this.assignments.applyAreaDefault(trx, [id], actor.id, 'Customer restored');
+      await this.assignments.afterPermanentChanges(trx, changes, 'Customer restored', 'assignment.area_default');
+      await this.audit.record(trx, { action: 'customer.restore', entityType: 'customer', entityId: id, reason });
+      return this.detail(trx, id);
     });
   }
 
@@ -469,7 +656,8 @@ export class CustomersService {
     let q = db
       .selectFrom('customers')
       .select(['id', 'customerCode', 'name'])
-      .where((eb) => eb.or([eb('mobile', 'in', numbers), eb('altMobile', 'in', numbers)]));
+      .where((eb) => eb.or([eb('mobile', 'in', numbers), eb('altMobile', 'in', numbers)]))
+      .where('deletedAt', 'is', null);
     if (excludeId) q = q.where('id', '!=', excludeId);
     const matches = await q.limit(20).execute();
     if (matches.length > 0) {
@@ -486,7 +674,9 @@ export class CustomersService {
       .selectFrom('customerConnections as cc')
       .innerJoin('customers as c', 'c.id', 'cc.customerId')
       .select(['c.id', 'c.customerCode', 'c.name', 'cc.activeTo'])
-      .where(sql<boolean>`upper(cc.stb_number) = ${stb}`);
+      .where(sql<boolean>`upper(cc.stb_number) = ${stb}`)
+      // A deleted customer's box is free to use again.
+      .where('c.deletedAt', 'is', null);
     if (excludeId) q = q.where('c.id', '!=', excludeId);
     const matches = await q.execute();
     if (matches.some((m) => m.activeTo === null)) {

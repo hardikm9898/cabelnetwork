@@ -60,11 +60,15 @@ describe('security hardening', () => {
       await h.http().post('/api/v1/auth/refresh').send({ refreshToken: ag.body.data.refreshToken }).expect(200);
     });
 
-    it('office passwords need 12 characters; common passwords and the own mobile are refused', async () => {
-      const t = await login(h.http, adminMobile, PASSWORD);
-      expect((await h.as(t).post('/api/v1/auth/change-password', { currentPassword: PASSWORD, newPassword: 'Short123abc' })).body.error.code).toBe('PASSWORD_TOO_SHORT');
-      expect((await h.as(t).post('/api/v1/auth/change-password', { currentPassword: PASSWORD, newPassword: 'MyPassword2026' })).body.error.code).toBe('PASSWORD_TOO_COMMON');
-      expect((await h.as(t).post('/api/v1/auth/change-password', { currentPassword: PASSWORD, newPassword: `x${adminMobile}1` })).body.error.code).toBe('PASSWORD_TOO_COMMON');
+    it('6 characters (digits only allowed); trivial passwords and the own mobile are refused', async () => {
+      const a = await createAgent(h, 'SEC3');
+      const change = (newPassword: string, currentPassword = PASSWORD) => h.as(a.token).post('/api/v1/auth/change-password', { currentPassword, newPassword });
+      expect((await change('48291')).status).toBe(400); // 5 characters
+      for (const trivial of ['123456', '654321', '111111', 'abcdef', 'qwerty']) expect((await change(trivial)).status, trivial).toBe(400);
+      expect((await change(a.mobile.slice(-6))).body.error.code).toBe('PASSWORD_TOO_COMMON');
+      expect((await change(`x${a.mobile}1`)).body.error.code).toBe('PASSWORD_TOO_COMMON');
+      await change('482915').expect(204);
+      await login(h.http, a.mobile, '482915');
     });
 
     it('wrong current passwords on change-password count toward the lockout', async () => {

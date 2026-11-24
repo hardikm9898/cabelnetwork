@@ -49,8 +49,8 @@ export class DashboardService {
 
     const kpi = await sql<Record<string, string>>`
       SELECT
-        (SELECT count(*) FROM customers c WHERE c.status IN ('ACTIVE', 'SUSPENDED') AND ${scope('c')}) AS active_customers,
-        (SELECT count(*) FROM customers c WHERE c.status IN ('INACTIVE', 'DISCONNECTED') AND ${scope('c')}) AS inactive_customers,
+        (SELECT count(*) FROM customers c WHERE c.status IN ('ACTIVE', 'SUSPENDED') AND c.deleted_at IS NULL AND ${scope('c')}) AS active_customers,
+        (SELECT count(*) FROM customers c WHERE c.status IN ('INACTIVE', 'DISCONNECTED') AND c.deleted_at IS NULL AND ${scope('c')}) AS inactive_customers,
         (SELECT coalesce(sum(p.amount), 0) FROM payments p WHERE p.payment_date = ${today}::date AND ${payScope}) AS today_collection,
         (SELECT coalesce(sum(p.amount), 0) FROM payments p WHERE p.payment_date BETWEEN ${from}::date AND ${to}::date AND ${payScope}) AS period_collection,
         (SELECT coalesce(sum(p.amount), 0) FROM payments p WHERE date_trunc('month', p.payment_date) = date_trunc('month', ${today}::date) AND ${payScope}) AS month_collection,
@@ -102,7 +102,7 @@ export class DashboardService {
             WHERE c2.society_id = so.id AND p.payment_date BETWEEN ${from}::date AND ${to}::date AND ${payScope}) AS collected,
           coalesce(sum(b.outstanding), 0) AS outstanding
         FROM societies so
-        JOIN customers c ON c.society_id = so.id AND ${scope('c')}
+        JOIN customers c ON c.society_id = so.id AND c.deleted_at IS NULL AND ${scope('c')}
         LEFT JOIN customer_balances b ON b.customer_id = c.id
         GROUP BY so.id ORDER BY collected DESC, so.name`.execute(this.db),
       sql<{ bucket: string; invoices: string; amount: string }>`

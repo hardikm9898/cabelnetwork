@@ -8,7 +8,6 @@ export interface SqlDb {
   runAsync(source: string, params: Param[]): Promise<unknown>;
   getAllAsync<T>(source: string, params: Param[]): Promise<T[]>;
   getFirstAsync<T>(source: string, params: Param[]): Promise<T | null>;
-  withExclusiveTransactionAsync(task: (txn: SqlDb) => Promise<void>): Promise<void>;
 }
 
 /**
@@ -17,6 +16,9 @@ export interface SqlDb {
  * tells whether that is really the case (Expo Go has plain SQLite, where `PRAGMA key` is ignored).
  */
 export class SqliteKV implements KV {
+  /** Writes run one after another on this connection (see `write`). */
+  private queue: Promise<unknown> = Promise.resolve();
+
   private constructor(
     private readonly db: SqlDb,
     private readonly storage: StorageInfo,
@@ -44,15 +46,32 @@ export class SqliteKV implements KV {
     return row?.value ?? null;
   }
 
-  async write(ops: KvWrite[]) {
-    if (ops.length === 0) return;
-    await this.db.withExclusiveTransactionAsync(async (txn) => {
+  /**
+   * All or nothing, on the connection that holds the encryption key. (expo-sqlite's
+   * withExclusiveTransactionAsync opens a second connection that has no key, so with SQLCipher
+   * every write failed with "file is not a database".) Writes are queued so that one write's
+   * statements never run inside another's transaction.
+   */
+  write(ops: KvWrite[]): Promise<void> {
+    if (ops.length === 0) return Promise.resolve();
+    const run = this.queue.then(() => this.writeNow(ops));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async writeNow(ops: KvWrite[]) {
+    await this.db.execAsync('BEGIN IMMEDIATE;');
+    try {
       for (const op of ops) {
-        if ('clear' in op) await txn.runAsync('DELETE FROM kv WHERE ns = ?', [op.ns]);
-        else if ('delete' in op) await txn.runAsync('DELETE FROM kv WHERE ns = ? AND key = ?', [op.ns, op.key]);
-        else await txn.runAsync('INSERT INTO kv (ns, key, value) VALUES (?, ?, ?) ON CONFLICT (ns, key) DO UPDATE SET value = excluded.value', [op.ns, op.key, op.value]);
+        if ('clear' in op) await this.db.runAsync('DELETE FROM kv WHERE ns = ?', [op.ns]);
+        else if ('delete' in op) await this.db.runAsync('DELETE FROM kv WHERE ns = ? AND key = ?', [op.ns, op.key]);
+        else await this.db.runAsync('INSERT INTO kv (ns, key, value) VALUES (?, ?, ?) ON CONFLICT (ns, key) DO UPDATE SET value = excluded.value', [op.ns, op.key, op.value]);
       }
-    });
+      await this.db.execAsync('COMMIT;');
+    } catch (e) {
+      await this.db.execAsync('ROLLBACK;').catch(() => undefined);
+      throw e;
+    }
   }
 
   info() {

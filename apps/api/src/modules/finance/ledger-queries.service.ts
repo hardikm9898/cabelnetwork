@@ -76,6 +76,7 @@ export class LedgerQueriesService {
         'e.paymentId',
         'p.mode as paymentMode',
         'c.creditNumber',
+        'e.creditNoteId',
         'r.refundNumber',
       ])
       .where('e.customerId', '=', customerId)

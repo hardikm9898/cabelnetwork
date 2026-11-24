@@ -40,6 +40,10 @@ export type CreateCustomerRequest = z.infer<typeof createCustomerRequest>;
 
 export const updateCustomerRequest = z
   .object({
+    customerCode,
+    /** Corrects the active box's number (typing mistake). A box swap is "replace connection". Empty removes the box. */
+    stbNumber: z.union([stbNumber, z.literal('')]).nullable(),
+    mqNumber: mqNumber.nullable(),
     name: trimmed(150),
     mobile: phoneInput.nullable(),
     altMobile: phoneInput.nullable(),
@@ -71,10 +75,21 @@ export const listCustomersQuery = paginationQuery.extend({
     .regex(/^\d{1,10}(\.\d{1,2})?$/)
     .optional(),
   sort: z.enum(CUSTOMER_SORTS).default('name'),
+  /** true: only deleted customers (to restore one); default: only customers that are not deleted. */
+  deleted: z
+    .enum(['true', 'false'])
+    .transform((v) => v === 'true')
+    .optional(),
 });
 export type ListCustomersQuery = z.infer<typeof listCustomersQuery>;
 
 export const customerStatusChangeRequest = z.object({ reason });
+
+/** Delete one customer (soft delete; the history stays and it can be restored). */
+export const deleteCustomerRequest = z.object({ reason });
+export type DeleteCustomerRequest = z.infer<typeof deleteCustomerRequest>;
+export const bulkDeleteCustomersRequest = z.object({ customerIds: z.array(uuid).min(1).max(500), reason });
+export type BulkDeleteCustomersRequest = z.infer<typeof bulkDeleteCustomersRequest>;
 export type CustomerStatusChangeRequest = z.infer<typeof customerStatusChangeRequest>;
 
 export const replaceConnectionRequest = z.object({

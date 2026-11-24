@@ -586,6 +586,7 @@ export class AssignmentsService {
       .innerJoin('societies as s', 's.id', 'c.societyId')
       .select('c.id')
       .where('s.areaId', '=', areaId)
+      .where('c.deletedAt', 'is', null)
       .execute();
     return rows.map((r) => r.id);
   }
@@ -595,7 +596,7 @@ export class AssignmentsService {
       const found = await db.selectFrom('societies').select('id').where('id', 'in', societyIds).execute();
       if (found.length !== new Set(societyIds).size) throw notFound('SOCIETY_NOT_FOUND', 'Society not found');
     }
-    const rows = await db.selectFrom('customers').select('id').where('societyId', 'in', societyIds).execute();
+    const rows = await db.selectFrom('customers').select('id').where('societyId', 'in', societyIds).where('deletedAt', 'is', null).execute();
     return rows.map((r) => r.id);
   }
 

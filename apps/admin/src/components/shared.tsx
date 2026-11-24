@@ -101,6 +101,7 @@ export function ReasonDialog({
   danger,
   onConfirm,
   children,
+  presets,
 }: {
   open: boolean;
   onClose: () => void;
@@ -110,6 +111,8 @@ export function ReasonDialog({
   danger?: boolean;
   onConfirm: (reason: string, idempotencyKey: string) => Promise<unknown>;
   children?: ReactNode;
+  /** One-tap reasons shown above the box. */
+  presets?: string[];
 }) {
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -153,8 +156,22 @@ export function ReasonDialog({
       <div className="space-y-3">
         {description && <div className="text-sm text-muted">{description}</div>}
         {children}
+        {presets && (
+          <div className="flex flex-wrap gap-2" aria-label="Quick reasons">
+            {presets.map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setReason(p)}
+                className={cx('rounded-full border px-3 py-1 text-sm', reason === p ? 'border-brand-600 bg-brand-50 text-brand-800' : 'border-line hover:bg-slate-50')}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        )}
         <Field label="Reason" required hint="Recorded in the audit log.">
-          {(id) => <Textarea id={id} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />}
+          {(id) => <Textarea id={id} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus={!presets} />}
         </Field>
         <ErrorNote error={error} />
       </div>

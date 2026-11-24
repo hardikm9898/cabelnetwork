@@ -106,7 +106,7 @@ async function main(): Promise<void> {
       const db = createDatabase(url, 1);
       try {
         await db.transaction().execute(async (trx) => {
-          const user = await trx.selectFrom('users').select('id').where('mobile', '=', mobile.normalized).executeTakeFirst();
+          const user = await trx.selectFrom('users').select('id').where('mobile', '=', mobile.normalized).where('deletedAt', 'is', null).executeTakeFirst();
           if (!user) throw new Error('No user with that mobile number');
           await trx
             .updateTable('users')
@@ -180,7 +180,7 @@ async function main(): Promise<void> {
         const db = ctx.get<Database>(DATABASE);
         const by = values.by ? normalizeIndianMobile(values.by) : null;
         if (values.by && !by?.valid) throw new Error('--by must be a 10-digit mobile number');
-        let q = db.selectFrom('users').select(['id', 'fullName', 'role']).where('role', '=', 'SUPER_ADMIN').where('status', '=', 'ACTIVE');
+        let q = db.selectFrom('users').select(['id', 'fullName', 'role']).where('role', '=', 'SUPER_ADMIN').where('status', '=', 'ACTIVE').where('deletedAt', 'is', null);
         if (by) q = q.where('mobile', '=', by.normalized);
         const admin = await q.orderBy('createdAt').executeTakeFirst();
         if (!admin) throw new Error(by ? 'No active super admin with that mobile number' : 'No active super admin: run create-super-admin first');

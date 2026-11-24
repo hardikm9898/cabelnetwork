@@ -4,7 +4,7 @@ import { Plus } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { ActionDialog } from '../components/ActionDialog';
-import { AgentSelect, AreaRow, AreaSelect, SocietyRow, useAreas, useSocieties } from '../components/shared';
+import { AgentSelect, AreaRow, AreaSelect, ReasonDialog, SocietyRow, useAreas, useSocieties } from '../components/shared';
 import { Badge, Button, Card, DataTable, Field, Input, PageHeader, Textarea, useToast } from '../components/ui';
 
 export default function AreasPage() {
@@ -16,6 +16,7 @@ export default function AreasPage() {
   const [areaDialog, setAreaDialog] = useState<AreaRow | 'new' | null>(null);
   const [ownerDialog, setOwnerDialog] = useState<AreaRow | null>(null);
   const [societyDialog, setSocietyDialog] = useState<SocietyRow | 'new' | null>(null);
+  const [deleting, setDeleting] = useState<{ kind: 'area' | 'society'; id: string; name: string } | null>(null);
   const refresh = () => qc.invalidateQueries({ predicate: (q) => ['areas', 'societies', 'customers', 'agents'].includes(String(q.queryKey[0])) });
   const manage = can('areas:manage');
 
@@ -45,6 +46,7 @@ export default function AreasPage() {
                   <div className="flex justify-end gap-1">
                     <Button size="sm" variant="secondary" onClick={() => setOwnerDialog(r)}>Change agent</Button>
                     <Button size="sm" variant="ghost" onClick={() => setAreaDialog(r)}>Rename</Button>
+                    <Button size="sm" variant="ghost" className="text-danger" onClick={() => setDeleting({ kind: 'area', id: r.id, name: r.name })}>Delete</Button>
                   </div>
                 ),
             },
@@ -67,11 +69,39 @@ export default function AreasPage() {
             { key: 'a', header: 'Area', cell: (r) => r.areaName ?? <Badge tone="warn">no area</Badge> },
             { key: 'd', header: 'Route day', align: 'right', cell: (r) => r.collectionDay ?? '—' },
             { key: 'c', header: 'Customers', align: 'right', cell: (r) => r.customerCount },
-            { key: 'x', header: '', cell: (r) => can('societies:manage') && <Button size="sm" variant="ghost" onClick={() => setSocietyDialog(r)}>Edit</Button> },
+            {
+              key: 'x',
+              header: '',
+              cell: (r) =>
+                can('societies:manage') && (
+                  <div className="flex justify-end gap-1">
+                    <Button size="sm" variant="ghost" onClick={() => setSocietyDialog(r)}>Edit</Button>
+                    <Button size="sm" variant="ghost" className="text-danger" onClick={() => setDeleting({ kind: 'society', id: r.id, name: r.name })}>Delete</Button>
+                  </div>
+                ),
+            },
           ]}
         />
       </Card>
 
+      <ReasonDialog
+        open={!!deleting}
+        onClose={() => setDeleting(null)}
+        title={`Delete ${deleting?.kind ?? ''} ${deleting?.name ?? ''}`}
+        danger
+        confirmLabel="Delete"
+        presets={['Created by mistake', 'Merged into another', 'Not used any more']}
+        description={
+          deleting?.kind === 'area'
+            ? 'Only an area without societies can be deleted: move its societies to another area (Edit society) first.'
+            : 'Only a society without customers can be deleted: move its customers to another society (Edit customer) or delete them first.'
+        }
+        onConfirm={async (reason) => {
+          await api('POST', `/${deleting!.kind === 'area' ? 'areas' : 'societies'}/${deleting!.id}/delete`, { body: { reason } });
+          toast(`${deleting!.name} deleted`);
+          await refresh();
+        }}
+      />
       <AreaDialog
         area={areaDialog}
         onClose={() => setAreaDialog(null)}

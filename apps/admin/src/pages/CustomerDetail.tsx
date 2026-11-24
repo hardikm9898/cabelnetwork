@@ -1,5 +1,5 @@
 import { ReactNode, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link, useNavigate, useParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { CalendarPlus, FileDown, MoreHorizontal, Phone, ReceiptIndianRupee } from 'lucide-react';
 import { api, apiPage, download } from '../lib/api';
@@ -7,6 +7,7 @@ import { useAuth } from '../lib/auth';
 import { date, dateTime, inr, label, today } from '../lib/format';
 import { ActionDialog } from '../components/ActionDialog';
 import { AgentSelect, MoneyInput, ReasonDialog, SocietySelect } from '../components/shared';
+import { DELETE_REASONS } from './Customers';
 import {
   Badge,
   Button,
@@ -27,6 +28,8 @@ import {
 } from '../components/ui';
 
 interface CustomerDetail {
+  deletedAt: string | null;
+  deleteReason: string | null;
   pendingDecision: string | null;
   imported: boolean;
   id: string;
@@ -69,6 +72,9 @@ interface Subscription {
   billingTiming: string;
   dueDays: number;
   currentMonthlyRate: string | null;
+  /** Current rate, or the first upcoming one (then monthlyRateFrom is its start date). */
+  monthlyRate: string | null;
+  monthlyRateFrom: string | null;
   cycleAmount: string | null;
   nextBilling: { start: string; end: string; billingDate: string; dueDate: string; amount: string } | null;
   rates: { id: string; monthlyRate: string; effectiveFrom: string; reason: string | null }[];
@@ -82,6 +88,8 @@ type Dialog =
   | 'edit'
   | 'deactivate'
   | 'reactivate'
+  | 'delete'
+  | 'restore'
   | 'interaction'
   | 'followup'
   | 'credit'
@@ -105,6 +113,7 @@ export default function CustomerDetailPage() {
   const [tab, setTab] = useState<Tab>('overview');
   const [dialog, setDialog] = useState<Dialog>(null);
   const [menu, setMenu] = useState(false);
+  const navigate = useNavigate();
   const close = () => setDialog(null);
   const refresh = () => qc.invalidateQueries({ predicate: (q) => JSON.stringify(q.queryKey).includes(id) || q.queryKey[0] === 'customers' });
 
@@ -132,6 +141,19 @@ export default function CustomerDetailPage() {
         / {c.customerCode}
       </div>
 
+      {c.deletedAt && (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+          <span>
+            This customer was <strong>deleted</strong> on {date(c.deletedAt)}
+            {c.deleteReason && ` (${c.deleteReason})`}. The history below is kept.
+          </span>
+          {can('customers:manage') && (
+            <Button size="sm" variant="secondary" onClick={() => setDialog('restore')}>
+              Restore customer
+            </Button>
+          )}
+        </div>
+      )}
       <Card>
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
@@ -155,6 +177,20 @@ export default function CustomerDetailPage() {
               )}
               <span className="text-muted">Agent: {c.currentAgent ? `${c.currentAgent.agentName} (${c.currentAgent.agentCode})` : 'unassigned'}</span>
             </p>
+            <div className="mt-3 flex flex-wrap gap-2 text-sm">
+              <span className="rounded-lg bg-slate-100 px-2.5 py-1">
+                Monthly charge:{' '}
+                <strong className="num">
+                  {s?.monthlyRate && s.status !== 'ENDED' ? `${inr(s.monthlyRate)}${s.monthlyRateFrom ? ` from ${date(s.monthlyRateFrom)}` : ''}` : 'not billed'}
+                </strong>
+              </span>
+              {c.activeConnections.map((x) => (
+                <span key={x.id} className="num rounded-lg bg-slate-100 px-2.5 py-1">
+                  STB {x.stbNumber}
+                  {x.mqNumber && ` · MQ ${x.mqNumber}`}
+                </span>
+              ))}
+            </div>
           </div>
           <div className="text-right" data-testid="customer-balance">
             {b ? (
@@ -176,7 +212,7 @@ export default function CustomerDetailPage() {
             {b?.pendingVerification.length ? <div className="text-xs text-warning">{b.pendingVerification.length} payment(s) awaiting verification</div> : null}
           </div>
         </div>
-        <div className="mt-4 flex flex-wrap gap-2">
+        <div className={cx('mt-4 flex flex-wrap gap-2', c.deletedAt && 'hidden')}>
           {can('payments:record') && (
             <Link to={`/collect?customer=${c.id}`}>
               <Button>
@@ -212,11 +248,12 @@ export default function CustomerDetailPage() {
                     ['assignments:manage', 'agent', 'Change agent'],
                     ['customers:manage', 'stb', 'Replace set-top box'],
                     ['customers:manage', c.status === 'INACTIVE' ? 'reactivate' : 'deactivate', c.status === 'INACTIVE' ? 'Reactivate customer' : 'Deactivate customer'],
+                    ['customers:manage', 'delete', 'Delete customer'],
                   ] as const
                 )
                   .filter(([p]) => can(p))
                   .map(([, d, text]) => (
-                    <button key={d} className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50" onClick={() => setDialog(d)}>
+                    <button key={d} className={cx('block w-full px-3 py-2 text-left text-sm hover:bg-slate-50', d === 'delete' && 'text-danger')} onClick={() => setDialog(d)}>
                       {text}
                     </button>
                   ))}
@@ -255,6 +292,9 @@ export default function CustomerDetailPage() {
                 ['Society', c.society.name],
                 ['Area', c.area?.name ?? '—'],
                 ['Set-top box', c.activeConnections.map((x) => x.stbNumber).join(', ') || '—'],
+                ['MQ number', c.activeConnections.map((x) => x.mqNumber).filter(Boolean).join(', ') || '—'],
+                ['Monthly charge', s?.monthlyRate && s.status !== 'ENDED' ? `${inr(s.monthlyRate)}${s.monthlyRateFrom ? ` from ${date(s.monthlyRateFrom)}` : ''}` : 'Not billed'],
+                ['Status', <StatusBadge key="st" status={c.status} />],
                 ['Primary agent', c.primaryAgent ? `${c.primaryAgent.agentName} (${label(c.primaryAgent.source)})` : '—'],
                 ['Collection day', c.collectionDay ?? '—'],
                 ['Usually pays', c.paymentPreferenceMonths ? `${c.paymentPreferenceMonths} month(s) at a time` : '—'],
@@ -262,6 +302,7 @@ export default function CustomerDetailPage() {
                 ['Last payment', b?.lastPayment ? `${inr(b.lastPayment.amount)} on ${date(b.lastPayment.paymentDate)} (${label(b.lastPayment.mode)})` : '—'],
                 ['Notes', c.notes ?? '—'],
                 ...(c.statusReason ? ([['Status reason', c.statusReason]] as [string, string][]) : []),
+                ...(c.pendingDecision ? ([['Needs decision', c.pendingDecision]] as [string, string][]) : []),
               ]}
             />
           </Card>
@@ -294,7 +335,7 @@ export default function CustomerDetailPage() {
                 <DescriptionList
                   items={[
                     ['Status', <StatusBadge key="s" status={s.status} />],
-                    ['Monthly rate', inr(s.currentMonthlyRate)],
+                    ['Monthly rate', s.monthlyRate ? `${inr(s.monthlyRate)}${s.monthlyRateFrom ? ` from ${date(s.monthlyRateFrom)}` : ''}` : '—'],
                     ['Billed', `${s.billingIntervalMonths === 1 ? 'Monthly' : `Every ${s.billingIntervalMonths} months`} (${inr(s.cycleAmount)}), ${s.billingTiming === 'ADVANCE' ? 'in advance' : 'in arrears'}`],
                     ['Billing day', `${s.billingAnchorDay} of the month · due after ${s.dueDays} days`],
                     ['Mode', s.billingMode === 'AUTO' ? 'Automatic' : 'Manual (office raises bills)'],
@@ -356,7 +397,34 @@ export default function CustomerDetailPage() {
       {tab === 'audit' && <AuditTab customerId={id} />}
 
       {/* ----------------------------- dialogs ----------------------------- */}
-      <EditCustomerDialog open={dialog === 'edit'} onClose={close} c={c} onSaved={() => done('Customer updated')} />
+      <EditCustomerDialog open={dialog === 'edit'} onClose={close} c={c} sub={s ?? null} onSaved={() => done('Customer updated')} />
+      <ReasonDialog
+        open={dialog === 'delete'}
+        onClose={close}
+        title={`Delete ${c.name}`}
+        description="The customer disappears from the lists, the agent's phone and billing. The payment history stays, and you can restore the customer later from 'Deleted customers'. Customers who still owe money or have an advance cannot be deleted: settle it first, or deactivate them instead."
+        confirmLabel="Delete customer"
+        danger
+        presets={DELETE_REASONS}
+        onConfirm={async (reason) => {
+          await api('POST', `/customers/${c.id}/delete`, { body: { reason } });
+          toast(`Customer ${c.customerCode} deleted`);
+          await refresh();
+          navigate('/customers');
+        }}
+      />
+      <ReasonDialog
+        open={dialog === 'restore'}
+        onClose={close}
+        title={`Restore ${c.name}`}
+        description="The customer comes back as inactive, with the agent of its area. Add the set-top box (Edit) and start billing again if needed, then reactivate."
+        confirmLabel="Restore"
+        presets={['Deleted by mistake', 'Customer came back']}
+        onConfirm={async (reason) => {
+          await api('POST', `/customers/${c.id}/restore`, { body: { reason } });
+          await done('Customer restored');
+        }}
+      />
       <ReasonDialog
         open={dialog === 'deactivate'}
         onClose={close}
@@ -598,10 +666,13 @@ function PaymentsTab({ customerId, onChanged }: { customerId: string; onChanged:
 
 function LedgerTab({ customerId }: { customerId: string }) {
   const toast = useToast();
+  const { can } = useAuth();
+  const qc = useQueryClient();
+  const [reverse, setReverse] = useState<{ creditNoteId: string; description: string } | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ['customer', customerId, 'ledger'],
     queryFn: () =>
-      api<{ entries: { id: string; entryDate: string; type: string; description: string; debit: string | null; credit: string | null; runningBalance: string }[] }>(
+      api<{ entries: { id: string; entryDate: string; type: string; description: string; debit: string | null; credit: string | null; runningBalance: string; creditNoteId: string | null; reversesEntryId: string | null }[] }>(
         'GET',
         `/customers/${customerId}/ledger`,
       ),
@@ -628,9 +699,36 @@ function LedgerTab({ customerId }: { customerId: string }) {
           { key: 'dr', header: 'Charge', align: 'right', cell: (r) => (r.debit ? inr(r.debit) : '') },
           { key: 'cr', header: 'Paid / credit', align: 'right', cell: (r) => (r.credit ? inr(r.credit) : '') },
           { key: 'bal', header: 'Balance', align: 'right', cell: (r) => <span className={r.runningBalance.startsWith('-') ? 'text-success' : ''}>{inr(r.runningBalance)}</span> },
+          {
+            key: 'x',
+            header: '',
+            cell: (r) =>
+              can('credits:manage') &&
+              r.creditNoteId &&
+              !r.reversesEntryId &&
+              !data?.entries.some((x) => x.reversesEntryId === r.id) && (
+                <Button size="sm" variant="ghost" onClick={() => setReverse({ creditNoteId: r.creditNoteId!, description: r.description })}>
+                  Reverse
+                </Button>
+              ),
+          },
         ]}
       />
       <p className="border-t border-line px-3 py-2 text-xs text-muted">Positive balance = customer owes; negative = advance.</p>
+      <ReasonDialog
+        open={!!reverse}
+        onClose={() => setReverse(null)}
+        title="Reverse discount / credit"
+        description={`${reverse?.description ?? ''}. The amount is added back to the customer's balance; both entries stay in the statement.`}
+        confirmLabel="Reverse"
+        danger
+        presets={['Entered by mistake', 'Wrong amount']}
+        onConfirm={async (reason) => {
+          await api('POST', `/credits/${reverse!.creditNoteId}/reverse`, { body: { reason } });
+          toast('Credit reversed');
+          await qc.invalidateQueries({ predicate: (q) => JSON.stringify(q.queryKey).includes(customerId) });
+        }}
+      />
     </Card>
   );
 }
@@ -840,8 +938,20 @@ function AuditTab({ customerId }: { customerId: string }) {
 // Dialogs
 // ---------------------------------------------------------------------------
 
-function EditCustomerDialog({ open, onClose, c, onSaved }: { open: boolean; onClose: () => void; c: CustomerDetail; onSaved: () => void }) {
-  const [f, setF] = useState({ name: c.name, mobile: c.mobile ?? '', altMobile: c.altMobile ?? '', addressLine: c.addressLine, landmark: c.landmark ?? '', societyId: c.society.id, notes: c.notes ?? '', collectionDay: c.collectionDay?.toString() ?? '', paymentPreferenceMonths: c.paymentPreferenceMonths?.toString() ?? '', ack: false });
+/** First day of next month (YYYY-MM-DD): when billing starts for a customer set up from Edit. */
+const nextMonthStart = () => {
+  const [y, m] = today().split('-').map(Number) as [number, number];
+  return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+};
+
+function EditCustomerDialog({ open, onClose, c, sub, onSaved }: { open: boolean; onClose: () => void; c: CustomerDetail; sub: Subscription | null; onSaved: () => void }) {
+  const box = c.activeConnections[0];
+  const live = sub && sub.status !== 'ENDED' ? sub : null;
+  const currentRate = live?.monthlyRate ?? '';
+  const [rate, setRate] = useState(currentRate);
+  const rateChanged = rate.trim() !== '' && Number(rate) !== Number(currentRate || NaN);
+  const rateFrom = live ? (live.nextBilling?.start ?? today()) : nextMonthStart();
+  const [f, setF] = useState({ customerCode: c.customerCode, stbNumber: box?.stbNumber ?? '', mqNumber: box?.mqNumber ?? '', name: c.name, mobile: c.mobile ?? '', altMobile: c.altMobile ?? '', addressLine: c.addressLine, landmark: c.landmark ?? '', societyId: c.society.id, notes: c.notes ?? '', collectionDay: c.collectionDay?.toString() ?? '', paymentPreferenceMonths: c.paymentPreferenceMonths?.toString() ?? '', ack: false });
   const up = (k: keyof typeof f, v: string | boolean) => setF((s) => ({ ...s, [k]: v }));
   return (
     <ActionDialog
@@ -852,6 +962,9 @@ function EditCustomerDialog({ open, onClose, c, onSaved }: { open: boolean; onCl
       onSubmit={async () => {
         await api('PATCH', `/customers/${c.id}`, {
           body: {
+            customerCode: f.customerCode,
+            stbNumber: f.stbNumber.trim(),
+            mqNumber: f.mqNumber.trim() || null,
             name: f.name,
             mobile: f.mobile || null,
             altMobile: f.altMobile || null,
@@ -864,12 +977,39 @@ function EditCustomerDialog({ open, onClose, c, onSaved }: { open: boolean; onCl
             acknowledgeWarnings: f.ack,
           },
         });
+        if (rateChanged) {
+          if (live) {
+            await api('POST', `/subscriptions/${live.id}/rates`, { body: { monthlyRate: rate.trim(), effectiveFrom: rateFrom, reason: 'Changed in Edit customer' } });
+          } else {
+            await api('POST', `/customers/${c.id}/subscription`, { body: { monthlyRate: rate.trim(), startDate: rateFrom, billingIntervalMonths: 1 } });
+          }
+        }
         onSaved();
       }}
     >
       {(err) => (
         <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Customer ID" error={err.customerCode}>{(id) => <Input id={id} value={f.customerCode} onChange={(e) => up('customerCode', e.target.value)} />}</Field>
           <Field label="Name" error={err.name}>{(id) => <Input id={id} value={f.name} onChange={(e) => up('name', e.target.value)} />}</Field>
+          <Field label="STB number" error={err.stbNumber} hint="Fix a typing mistake here. For a new box use ⋯ → Replace set-top box (keeps history).">
+            {(id) => <Input id={id} value={f.stbNumber} onChange={(e) => up('stbNumber', e.target.value)} />}
+          </Field>
+          <Field label="MQ number" error={err.mqNumber}>{(id) => <Input id={id} value={f.mqNumber} onChange={(e) => up('mqNumber', e.target.value)} />}</Field>
+          <Field
+            label="Monthly charge"
+            error={err.monthlyRate}
+            hint={
+              rateChanged
+                ? live
+                  ? `New charge applies from ${date(rateFrom)} (next bill). Past bills do not change.`
+                  : `Billing starts on ${date(rateFrom)} at this charge.`
+                : live
+                  ? 'Current charge. Change it here; past bills do not change.'
+                  : 'Not billed yet. Enter the charge to start billing next month.'
+            }
+          >
+            {(id) => <MoneyInput id={id} value={rate} onChange={setRate} />}
+          </Field>
           <Field label="Mobile" error={err.mobile}>{(id) => <Input id={id} value={f.mobile} onChange={(e) => up('mobile', e.target.value)} />}</Field>
           <Field label="Alternate mobile">{(id) => <Input id={id} value={f.altMobile} onChange={(e) => up('altMobile', e.target.value)} />}</Field>
           <Field label="Society">{(id) => <SocietySelect id={id} value={f.societyId} onChange={(v) => up('societyId', v)} includeAll={false} />}</Field>

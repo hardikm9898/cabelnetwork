@@ -57,12 +57,17 @@ export class SubscriptionsService {
     ]);
     const today = businessDateOf(new Date());
     const current = rates.find((r) => r.effectiveFrom <= today) ?? null;
+    // Before the first rate starts (e.g. imported customers before cutover), the upcoming one.
+    const upcoming = current ? null : ([...rates].reverse().find((r) => r.effectiveFrom > today) ?? null);
     const live = sub.status !== 'ENDED' || (sub.endDate !== null && sub.nextPeriodStart <= sub.endDate);
     const next = live ? periodAt(sub.nextPeriodStart, sub.billingIntervalMonths, sub.billingTiming, sub.dueDays) : null;
     const nextRate = next ? (rates.find((r) => r.effectiveFrom <= next.start)?.monthlyRate ?? null) : null;
     return {
       ...sub,
       currentMonthlyRate: current?.monthlyRate ?? null,
+      /** The rate shown to people: current, or the first one still to come. */
+      monthlyRate: current?.monthlyRate ?? upcoming?.monthlyRate ?? null,
+      monthlyRateFrom: current ? null : (upcoming?.effectiveFrom ?? null),
       cycleAmount: current ? fromPaise(toPaise(current.monthlyRate) * BigInt(sub.billingIntervalMonths)) : null,
       nextBilling: next && nextRate ? { ...next, amount: fromPaise(toPaise(nextRate) * BigInt(sub.billingIntervalMonths)) } : null,
       rates,
@@ -141,6 +146,19 @@ export class SubscriptionsService {
         );
       }
       const before = await this.currentRate(trx, subscriptionId, input.effectiveFrom);
+      // Same date as an existing rate: nothing is billed from that date (checked above), so the
+      // old rate was never used and is replaced (audited below with the old value).
+      const sameDay = await trx
+        .selectFrom('subscriptionRates')
+        .select(['id', 'monthlyRate'])
+        .where('subscriptionId', '=', subscriptionId)
+        .where('effectiveFrom', '=', input.effectiveFrom)
+        .executeTakeFirst();
+      if (sameDay) {
+        await sql`SELECT set_config('cablenet.replace_unbilled_rate', 'on', true)`.execute(trx);
+        await trx.deleteFrom('subscriptionRates').where('id', '=', sameDay.id).execute();
+        await sql`SELECT set_config('cablenet.replace_unbilled_rate', 'off', true)`.execute(trx);
+      }
       await trx
         .insertInto('subscriptionRates')
         .values({ subscriptionId, monthlyRate: input.monthlyRate, effectiveFrom: input.effectiveFrom, reason: input.reason, createdBy: actor.id })

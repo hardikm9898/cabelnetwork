@@ -1,6 +1,8 @@
 import { Controller, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import {
+  BulkDeleteCustomersRequest,
+  bulkDeleteCustomersRequest,
   CreateCustomerRequest,
   createCustomerRequest,
   CustomerStatusChangeRequest,
@@ -87,6 +89,37 @@ export class CustomersController {
     @ZodBody(customerStatusChangeRequest) body: CustomerStatusChangeRequest,
   ) {
     return this.customers.changeStatus(id, 'reactivate', body.reason, user);
+  }
+
+  /** Soft delete (history kept); refused while money is open. */
+  @RequirePermissions('customers:manage')
+  @Post(':id/delete')
+  @HttpCode(200)
+  remove(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @ZodBody(customerStatusChangeRequest) body: CustomerStatusChangeRequest,
+  ) {
+    return this.customers.remove(id, body.reason, user);
+  }
+
+  /** Deletes the selected customers; the ones that cannot be deleted are listed with the reason. */
+  @RequirePermissions('customers:manage')
+  @Post('bulk-delete')
+  @HttpCode(200)
+  bulkRemove(@CurrentUser() user: AuthUser, @ZodBody(bulkDeleteCustomersRequest) body: BulkDeleteCustomersRequest) {
+    return this.customers.bulkRemove(body.customerIds, body.reason, user);
+  }
+
+  @RequirePermissions('customers:manage')
+  @Post(':id/restore')
+  @HttpCode(200)
+  restore(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @ZodBody(customerStatusChangeRequest) body: CustomerStatusChangeRequest,
+  ) {
+    return this.customers.restore(id, body.reason, user);
   }
 
   @RequirePermissions('customers:manage')

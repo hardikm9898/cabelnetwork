@@ -4,6 +4,7 @@ import type {
   ChangeUserStatusRequest,
   CreateAdminUserRequest,
   CreateAgentRequest,
+  UpdateAdminUserRequest,
   UpdateAgentRequest,
 } from '@cablenet/contracts';
 import { businessDateOf, cleanText, normalizeIndianMobile, Role } from '@cablenet/domain';
@@ -39,7 +40,7 @@ export class PeopleService {
   // ---------------------------------------------------------------------------
 
   async listAgents(filter: { status?: string; q?: string }) {
-    let q = this.db.selectFrom('users as u').innerJoin('agentProfiles as a', 'a.userId', 'u.id').where('u.role', '=', 'AGENT');
+    let q = this.db.selectFrom('users as u').innerJoin('agentProfiles as a', 'a.userId', 'u.id').where('u.role', '=', 'AGENT').where('u.deletedAt', 'is', null);
     if (filter.status) q = q.where('u.status', '=', filter.status as never);
     if (filter.q) {
       const term = `%${filter.q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -177,6 +178,7 @@ export class PeopleService {
       .selectFrom('users as u')
       .select([...STAFF_COLUMNS])
       .where('u.role', 'in', ['ADMIN', 'SUPER_ADMIN'])
+      .where('u.deletedAt', 'is', null)
       .orderBy('u.fullName')
       .execute();
   }
@@ -205,9 +207,81 @@ export class PeopleService {
     });
   }
 
+  /** Name, mobile, email and role of an office account. */
+  async updateAdmin(id: string, input: UpdateAdminUserRequest, actor: AuthUser) {
+    return this.db.transaction().execute(async (trx) => {
+      const before = await trx
+        .selectFrom('users')
+        .select(['id', 'fullName', 'mobile', 'email', 'role', 'status'])
+        .where('id', '=', id)
+        .where('role', 'in', ['ADMIN', 'SUPER_ADMIN'])
+        .where('deletedAt', 'is', null)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!before) throw notFound('USER_NOT_FOUND', 'User not found');
+      const patch: Record<string, unknown> = {};
+      if (input.fullName !== undefined) patch.fullName = cleanText(input.fullName);
+      if (input.email !== undefined) patch.email = input.email;
+      if (input.mobile !== undefined) {
+        const mobile = this.staffMobile(input.mobile);
+        if (mobile !== before.mobile) {
+          await this.assertMobileFree(trx, mobile);
+          patch.mobile = mobile;
+        }
+      }
+      if (input.role !== undefined && input.role !== before.role) {
+        if (id === actor.id) throw forbidden('CANNOT_CHANGE_OWN_ROLE', 'You cannot change your own role');
+        if (before.role === 'SUPER_ADMIN') await this.assertAnotherSuperAdmin(trx, id);
+        patch.role = input.role;
+      }
+      const keys = Object.keys(patch).filter((k) => patch[k] !== (before as Record<string, unknown>)[k]);
+      if (keys.length === 0) return before;
+      await trx.updateTable('users').set({ ...patch, updatedBy: actor.id }).where('id', '=', id).execute();
+      // A new role or mobile number takes effect at the next sign-in.
+      if (patch.role !== undefined || patch.mobile !== undefined) await this.auth.revokeAllSessions(trx, id, 'account_changed_by_admin');
+      await this.audit.record(trx, {
+        action: 'user.update',
+        entityType: 'user',
+        entityId: id,
+        before: pick(before, keys),
+        after: Object.fromEntries(keys.map((k) => [k, patch[k]])),
+      });
+      return { ...before, ...patch };
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Shared account operations
   // ---------------------------------------------------------------------------
+
+  /**
+   * Deletes an office or agent account: it can no longer sign in, disappears from the lists, and
+   * its mobile number can be used again. Its history (payments it recorded, audit) stays.
+   * An agent must first hand over its customers and areas.
+   */
+  async deleteUser(userId: string, reason: string, actor: AuthUser, allowedRoles: Role[]) {
+    if (userId === actor.id) throw forbidden('CANNOT_DELETE_SELF', 'You cannot delete your own account');
+    await this.db.transaction().execute(async (trx) => {
+      const user = await trx
+        .selectFrom('users')
+        .select(['id', 'role', 'status', 'fullName', 'mobile'])
+        .where('id', '=', userId)
+        .where('deletedAt', 'is', null)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!user || !allowedRoles.includes(user.role)) throw notFound('USER_NOT_FOUND', 'User not found');
+      if (user.role === 'AGENT') await this.assertNoAssignments(trx, userId);
+      if (user.role === 'SUPER_ADMIN') await this.assertAnotherSuperAdmin(trx, userId);
+      await trx
+        .updateTable('users')
+        .set({ status: 'DEACTIVATED', deletedAt: sql<Date>`now()`, deletedBy: actor.id, updatedBy: actor.id })
+        .where('id', '=', userId)
+        .execute();
+      await this.auth.revokeAllSessions(trx, userId, 'account_deleted');
+      await this.audit.record(trx, { action: 'user.delete', entityType: 'user', entityId: userId, before: { fullName: user.fullName, mobile: user.mobile, role: user.role, status: user.status }, reason });
+    });
+    return { ok: true };
+  }
 
   /** Activate / suspend / deactivate a staff account. Non-active accounts are signed out everywhere. */
   async changeStatus(userId: string, input: ChangeUserStatusRequest, actor: AuthUser, allowedRoles: Role[]) {
@@ -283,7 +357,7 @@ export class PeopleService {
   }
 
   private async assertMobileFree(db: Database, mobile: string): Promise<void> {
-    const taken = await db.selectFrom('users').select('id').where('mobile', '=', mobile).executeTakeFirst();
+    const taken = await db.selectFrom('users').select('id').where('mobile', '=', mobile).where('deletedAt', 'is', null).executeTakeFirst();
     if (taken) throw conflict('MOBILE_IN_USE', 'Another user already uses this mobile number');
   }
 
@@ -312,6 +386,19 @@ export class PeopleService {
       areasOwned: Number(areas.n),
       openTemporaryReassignments: Number(temps.n),
     };
+  }
+
+  /** There must always be one active super admin left. */
+  private async assertAnotherSuperAdmin(db: Database, userId: string): Promise<void> {
+    const other = await db
+      .selectFrom('users')
+      .select('id')
+      .where('role', '=', 'SUPER_ADMIN')
+      .where('status', '=', 'ACTIVE')
+      .where('deletedAt', 'is', null)
+      .where('id', '<>', userId)
+      .executeTakeFirst();
+    if (!other) throw conflict('LAST_SUPER_ADMIN', 'This is the only super admin; make another user super admin first');
   }
 
   private async assertNoAssignments(db: Database, agentId: string): Promise<void> {

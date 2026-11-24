@@ -7,7 +7,7 @@ import { useAuth } from '../lib/auth';
 import { dateTime } from '../lib/format';
 import { ActionDialog } from '../components/ActionDialog';
 import { useAgents } from '../components/shared';
-import { Button, Card, DataTable, Field, Input, PageHeader, StatusBadge, useToast } from '../components/ui';
+import { Button, Card, DataTable, Field, Input, PageHeader, PASSWORD_HINT, PasswordInput, StatusBadge, useToast } from '../components/ui';
 
 export default function AgentsPage() {
   const { data, isLoading } = useAgents();
@@ -73,8 +73,8 @@ function CreateAgentDialog({ open, onClose, onCreated }: { open: boolean; onClos
           <Field label="Agent code" required error={err.agentCode} hint="2–10 letters/digits, e.g. AG01">{(id) => <Input id={id} value={f.agentCode} onChange={(e) => setF({ ...f, agentCode: e.target.value.toUpperCase() })} />}</Field>
           <Field label="Joining date">{(id) => <Input id={id} type="date" value={f.joiningDate} onChange={(e) => setF({ ...f, joiningDate: e.target.value })} />}</Field>
           <div className="sm:col-span-2">
-            <Field label="Temporary password" required error={err.temporaryPassword} hint="At least 8 characters with letters and digits">
-              {(id) => <Input id={id} value={f.temporaryPassword} onChange={(e) => setF({ ...f, temporaryPassword: e.target.value })} autoComplete="off" />}
+            <Field label="Temporary password" required error={err.temporaryPassword} hint={PASSWORD_HINT}>
+              {(id) => <PasswordInput id={id} initiallyVisible value={f.temporaryPassword} onChange={(e) => setF({ ...f, temporaryPassword: e.target.value })} autoComplete="off" />}
             </Field>
           </div>
         </div>

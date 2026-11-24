@@ -34,6 +34,8 @@ export interface UsersTable {
   updatedAt: Generated<Date>;
   createdBy: string | null;
   updatedBy: string | null;
+  deletedAt: NullableTimestamp;
+  deletedBy: string | null;
 }
 
 export interface AgentProfilesTable {
@@ -84,6 +86,8 @@ export interface AreasTable {
   updatedAt: Generated<Date>;
   createdBy: string | null;
   updatedBy: string | null;
+  deletedAt: NullableTimestamp;
+  deletedBy: string | null;
 }
 
 export interface SocietiesTable {
@@ -97,6 +101,8 @@ export interface SocietiesTable {
   updatedAt: Generated<Date>;
   createdBy: string | null;
   updatedBy: string | null;
+  deletedAt: NullableTimestamp;
+  deletedBy: string | null;
 }
 
 export interface CustomersTable {
@@ -122,6 +128,9 @@ export interface CustomersTable {
   updatedAt: Generated<Date>;
   createdBy: string | null;
   updatedBy: string | null;
+  deletedAt: NullableTimestamp;
+  deletedBy: string | null;
+  deleteReason: string | null;
   deactivatedAt: NullableTimestamp;
 }
 

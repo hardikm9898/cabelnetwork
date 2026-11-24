@@ -38,7 +38,7 @@ Phones and the office site reach only `https://<SITE_ADDRESS>`. Ports 80 and 443
    $C run --rm --no-deps api node apps/api/dist/src/cli.js create-super-admin --mobile <10 digits> --name "<Owner name>"
    ```
 
-   Sign in at `https://<SITE_ADDRESS>` with `BOOTSTRAP_PASSWORD`. The site forces a new password: 12+ characters, not containing the mobile number. Then delete `BOOTSTRAP_PASSWORD` from `prod.env`.
+   Sign in at `https://<SITE_ADDRESS>` with `BOOTSTRAP_PASSWORD`. The site forces a new password: 6+ characters (a 6-digit number is fine), not trivial (123456, 111111) and not the mobile number. Then delete `BOOTSTRAP_PASSWORD` from `prod.env`.
 5. In the office site:
    - **Settings:** business name, address and phone (printed on receipts), billing defaults.
    - **Agents:** one per agent, each with a temporary password.

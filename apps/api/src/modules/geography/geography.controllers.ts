@@ -10,6 +10,7 @@ import {
   setAreaOwnerRequest,
   UpdateAreaRequest,
   updateAreaRequest,
+  reason,
   UpdateSocietyRequest,
   updateSocietyRequest,
   uuid,
@@ -53,6 +54,13 @@ export class AreasController {
     return this.geo.updateArea(id, body, user);
   }
 
+  @RequirePermissions('areas:manage')
+  @Post(':id/delete')
+  @HttpCode(200)
+  remove(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(z.object({ reason })) body: { reason: string }) {
+    return this.geo.deleteArea(id, body.reason, user);
+  }
+
   /** Set (or clear) the default agent for an area; customers following the default move with it. */
   @RequirePermissions('areas:manage', 'assignments:manage')
   @Put(':id/owner')
@@ -92,5 +100,12 @@ export class SocietiesController {
   @Patch(':id')
   update(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(updateSocietyRequest) body: UpdateSocietyRequest) {
     return this.geo.updateSociety(id, body, user);
+  }
+
+  @RequirePermissions('societies:manage')
+  @Post(':id/delete')
+  @HttpCode(200)
+  remove(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(z.object({ reason })) body: { reason: string }) {
+    return this.geo.deleteSociety(id, body.reason, user);
   }
 }

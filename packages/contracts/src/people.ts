@@ -43,6 +43,16 @@ export const updateAgentRequest = z
   .partial();
 export type UpdateAgentRequest = z.infer<typeof updateAgentRequest>;
 
+export const updateAdminUserRequest = z
+  .object({
+    fullName: trimmed(120),
+    mobile: phoneInput,
+    email: z.email().nullable(),
+    role: z.enum(['ADMIN', 'SUPER_ADMIN']),
+  })
+  .partial();
+export type UpdateAdminUserRequest = z.infer<typeof updateAdminUserRequest>;
+
 export const resetPasswordRequest = z.object({ temporaryPassword: passwordPolicy, reason });
 export type ResetPasswordRequest = z.infer<typeof resetPasswordRequest>;
 

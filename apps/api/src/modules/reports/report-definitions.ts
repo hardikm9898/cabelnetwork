@@ -100,7 +100,7 @@ export const REPORTS: ReportDefinition[] = [
       LEFT JOIN customer_subscriptions sub ON sub.customer_id = cu.id AND sub.status <> 'ENDED'
       LEFT JOIN LATERAL (SELECT r.monthly_rate FROM subscription_rates r WHERE r.subscription_id = sub.id AND r.effective_from <= ${f.today}::date
                          ORDER BY r.effective_from DESC LIMIT 1) rt ON TRUE
-      WHERE ${scope(f)} ${f.status ? sql`AND cu.status = ${f.status}::customer_status` : sql``}`,
+      WHERE ${scope(f)} AND cu.deleted_at IS NULL ${f.status ? sql`AND cu.status = ${f.status}::customer_status` : sql``}`,
   },
   {
     key: 'outstanding',
@@ -155,7 +155,7 @@ export const REPORTS: ReportDefinition[] = [
       LEFT JOIN customer_subscriptions sub ON sub.customer_id = cu.id AND sub.status <> 'ENDED'
       LEFT JOIN LATERAL (SELECT r.monthly_rate FROM subscription_rates r WHERE r.subscription_id = sub.id AND r.effective_from <= ${f.today}::date
                          ORDER BY r.effective_from DESC LIMIT 1) rt ON TRUE
-      WHERE ${scope(f)} AND cb.balance < 0`,
+      WHERE ${scope(f)} AND cu.deleted_at IS NULL AND cb.balance < 0`,
   },
   {
     key: 'customer-ledger',
@@ -301,7 +301,7 @@ export const REPORTS: ReportDefinition[] = [
     ],
     query: (f) => sql`
       SELECT so.name AS society, ar.name AS area,
-        (SELECT count(*) FROM customers cu WHERE cu.society_id = so.id) AS customers,
+        (SELECT count(*) FROM customers cu WHERE cu.society_id = so.id AND cu.deleted_at IS NULL) AS customers,
         b.billed, p.collected,
         CASE WHEN b.billed > 0 THEN round(p.collected * 100 / b.billed, 1) END AS collection_pct,
         (SELECT coalesce(sum(cb.outstanding), 0) FROM customers cu JOIN customer_balances cb ON cb.customer_id = cu.id WHERE cu.society_id = so.id) AS outstanding
@@ -310,7 +310,7 @@ export const REPORTS: ReportDefinition[] = [
                           WHERE cu.society_id = so.id AND e.type = 'CHARGE' AND ${between(sql`e.entry_date`, f)}) b
       CROSS JOIN LATERAL (SELECT coalesce(sum(x.amount), 0) AS collected FROM payments x JOIN customers cu ON cu.id = x.customer_id
                           WHERE cu.society_id = so.id AND x.status = 'CONFIRMED' AND ${between(sql`x.payment_date`, f)}) p
-      WHERE TRUE ${f.areaId ? sql`AND so.area_id = ${f.areaId}::uuid` : sql``} ${f.societyId ? sql`AND so.id = ${f.societyId}::uuid` : sql``}`,
+      WHERE so.deleted_at IS NULL ${f.areaId ? sql`AND so.area_id = ${f.areaId}::uuid` : sql``} ${f.societyId ? sql`AND so.id = ${f.societyId}::uuid` : sql``}`,
   },
   {
     key: 'payment-mode',
@@ -553,7 +553,7 @@ export const REPORTS: ReportDefinition[] = [
       SELECT cu.customer_code, cu.name, cu.mobile, so.name AS society, cu.status::text AS status, cu.status_reason,
              ${istDate('cu.deactivated_at')} AS deactivated_on, coalesce(cb.outstanding, 0) AS outstanding
       FROM customers cu ${customerJoins}
-      WHERE cu.status IN ('INACTIVE', 'DISCONNECTED') AND ${scope(f)}`,
+      WHERE cu.status IN ('INACTIVE', 'DISCONNECTED') AND cu.deleted_at IS NULL AND ${scope(f)}`,
   },
   {
     key: 'payment-reversal',

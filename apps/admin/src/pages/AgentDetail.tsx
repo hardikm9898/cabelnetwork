@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link, useNavigate, useParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { date, dateTime, inr, label } from '../lib/format';
 import { ActionDialog } from '../components/ActionDialog';
 import { ReasonDialog } from '../components/shared';
-import { Button, Card, DataTable, DescriptionList, ErrorNote, Field, Input, Select, Spinner, StatusBadge, useToast } from '../components/ui';
+import { Button, Card, DataTable, DescriptionList, ErrorNote, Field, Input, PASSWORD_HINT, PasswordInput, Select, Spinner, StatusBadge, useToast } from '../components/ui';
 
 interface Agent {
   id: string;
@@ -31,7 +31,8 @@ export default function AgentDetailPage() {
   const { can } = useAuth();
   const qc = useQueryClient();
   const toast = useToast();
-  const [dialog, setDialog] = useState<null | 'edit' | 'status' | 'password' | 'device'>(null);
+  const [dialog, setDialog] = useState<null | 'edit' | 'status' | 'password' | 'device' | 'delete'>(null);
+  const navigate = useNavigate();
   const [target, setTarget] = useState<{ status?: string; deviceId?: string }>({});
   const agent = useQuery({ queryKey: ['agent', id], queryFn: () => api<Agent>('GET', `/agents/${id}`) });
   const cash = useQuery({ queryKey: ['agent', id, 'cash'], queryFn: () => api<{ cashInHand: string; day: { cashCollected: string; upiCollected: string } }>('GET', `/cash/agents/${id}`), enabled: can('cash:manage') });
@@ -62,6 +63,9 @@ export default function AgentDetailPage() {
               <Button size="sm" variant="secondary" onClick={() => setDialog('password')}>Reset password</Button>
               <Button size="sm" variant={a.status === 'ACTIVE' ? 'ghost' : 'primary'} onClick={() => { setTarget({ status: a.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE' }); setDialog('status'); }}>
                 {a.status === 'ACTIVE' ? 'Suspend' : 'Activate'}
+              </Button>
+              <Button size="sm" variant="ghost" className="text-danger" onClick={() => setDialog('delete')}>
+                Delete
               </Button>
             </>
           )
@@ -156,6 +160,21 @@ export default function AgentDetailPage() {
       />
       <ResetPasswordDialog open={dialog === 'password'} onClose={() => setDialog(null)} agentId={id} />
       <ReasonDialog
+        open={dialog === 'delete'}
+        onClose={() => setDialog(null)}
+        title={`Delete agent ${a.fullName}`}
+        danger
+        confirmLabel="Delete agent"
+        presets={['Left the job', 'Created by mistake']}
+        description="The agent can no longer sign in and disappears from the lists; the payments they collected stay in the history. Move their customers and areas to another agent first (Areas & societies, Assignments)."
+        onConfirm={async (reason) => {
+          await api('POST', `/agents/${id}/delete`, { body: { reason } });
+          toast('Agent deleted');
+          await refresh();
+          navigate('/agents');
+        }}
+      />
+      <ReasonDialog
         open={dialog === 'device'}
         onClose={() => setDialog(null)}
         title="Block device"
@@ -223,7 +242,7 @@ function ResetPasswordDialog({ open, onClose, agentId }: { open: boolean; onClos
     >
       {(err) => (
         <>
-          <Field label="Temporary password" required error={err.temporaryPassword}>{(id) => <Input id={id} value={pwd} onChange={(e) => setPwd(e.target.value)} autoComplete="off" />}</Field>
+          <Field label="Temporary password" required error={err.temporaryPassword} hint={PASSWORD_HINT}>{(id) => <PasswordInput id={id} initiallyVisible value={pwd} onChange={(e) => setPwd(e.target.value)} autoComplete="off" />}</Field>
           <Field label="Reason" required error={err.reason}>{(id) => <Input id={id} value={reason} onChange={(e) => setReason(e.target.value)} />}</Field>
         </>
       )}

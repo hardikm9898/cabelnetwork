@@ -6,7 +6,7 @@ import { useAuth } from '../lib/auth';
 import { dateTime } from '../lib/format';
 import { ActionDialog } from '../components/ActionDialog';
 import { MoneyInput, ReasonDialog } from '../components/shared';
-import { Button, Card, DataTable, ErrorNote, Field, Input, PageHeader, Select, StatusBadge, Textarea, useToast } from '../components/ui';
+import { Button, Card, DataTable, ErrorNote, Field, Input, PageHeader, PASSWORD_HINT, PasswordInput, Select, StatusBadge, Textarea, useToast } from '../components/ui';
 
 type Settings = {
   'business.profile': { name: string; address?: string | null; phone?: string | null; email?: string | null; gstin?: string | null; receiptFooter?: string | null; logoUrl?: string | null };
@@ -167,7 +167,13 @@ function AdminUsers() {
   const { data, isLoading } = useQuery({ queryKey: ['admin-users'], queryFn: () => api<AdminUser[]>('GET', '/users') });
   const [creating, setCreating] = useState(false);
   const [status, setStatus] = useState<AdminUser | null>(null);
+  const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [resetting, setResetting] = useState<AdminUser | null>(null);
+  const [deleting, setDeleting] = useState<AdminUser | null>(null);
+  const [e, setE] = useState({ fullName: '', mobile: '', role: 'ADMIN' });
+  const [pwd, setPwd] = useState('');
   const [f, setF] = useState({ fullName: '', mobile: '', role: 'ADMIN', temporaryPassword: '' });
+  const reload = () => qc.invalidateQueries({ queryKey: ['admin-users'] });
   return (
     <Card title="Office users" padded={false} actions={<Button size="sm" onClick={() => setCreating(true)}><Plus className="size-4" aria-hidden /> User</Button>}>
       <DataTable
@@ -180,7 +186,44 @@ function AdminUsers() {
           { key: 'r', header: 'Role', cell: (r) => r.role.replace('_', ' ').toLowerCase() },
           { key: 's', header: 'Status', cell: (r) => <StatusBadge status={r.status} /> },
           { key: 'l', header: 'Last sign-in', cell: (r) => dateTime(r.lastLoginAt) },
-          { key: 'x', header: '', cell: (r) => r.id !== me?.id && <Button size="sm" variant="ghost" onClick={() => setStatus(r)}>{r.status === 'ACTIVE' ? 'Suspend' : 'Activate'}</Button> },
+          {
+            key: 'x',
+            header: 'Actions',
+            cell: (r) => (
+              <div className="flex flex-wrap gap-1">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setE({ fullName: r.fullName, mobile: r.mobile, role: r.role });
+                    setEditing(r);
+                  }}
+                >
+                  Edit
+                </Button>
+                {r.id !== me?.id && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setPwd('');
+                        setResetting(r);
+                      }}
+                    >
+                      Reset password
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setStatus(r)}>
+                      {r.status === 'ACTIVE' ? 'Suspend' : 'Activate'}
+                    </Button>
+                    <Button size="sm" variant="ghost" className="text-danger" onClick={() => setDeleting(r)}>
+                      Delete
+                    </Button>
+                  </>
+                )}
+              </div>
+            ),
+          },
         ]}
       />
       <ActionDialog
@@ -206,10 +249,67 @@ function AdminUsers() {
                 </Select>
               )}
             </Field>
-            <Field label="Temporary password" required error={err.temporaryPassword}>{(id) => <Input id={id} value={f.temporaryPassword} onChange={(e) => setF({ ...f, temporaryPassword: e.target.value })} autoComplete="off" />}</Field>
+            <Field label="Temporary password" required error={err.temporaryPassword} hint={PASSWORD_HINT}>{(id) => <PasswordInput id={id} initiallyVisible value={f.temporaryPassword} onChange={(e) => setF({ ...f, temporaryPassword: e.target.value })} autoComplete="off" />}</Field>
           </div>
         )}
       </ActionDialog>
+      <ActionDialog
+        open={!!editing}
+        onClose={() => setEditing(null)}
+        title={`Edit ${editing?.fullName ?? ''}`}
+        onSubmit={async () => {
+          await api('PATCH', `/users/${editing!.id}`, { body: editing!.id === me?.id ? { fullName: e.fullName, mobile: e.mobile } : e });
+          toast('User updated');
+          await reload();
+        }}
+      >
+        {(err) => (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Full name" required error={err.fullName}>{(id) => <Input id={id} value={e.fullName} onChange={(ev) => setE({ ...e, fullName: ev.target.value })} />}</Field>
+            <Field label="Mobile (login)" required error={err.mobile}>{(id) => <Input id={id} value={e.mobile} onChange={(ev) => setE({ ...e, mobile: ev.target.value })} />}</Field>
+            {editing?.id !== me?.id && (
+              <Field label="Role">
+                {(id) => (
+                  <Select id={id} value={e.role} onChange={(ev) => setE({ ...e, role: ev.target.value })}>
+                    <option value="ADMIN">Admin</option>
+                    <option value="SUPER_ADMIN">Super admin</option>
+                  </Select>
+                )}
+              </Field>
+            )}
+          </div>
+        )}
+      </ActionDialog>
+      <ReasonDialog
+        open={!!resetting}
+        onClose={() => setResetting(null)}
+        title={`Reset password of ${resetting?.fullName ?? ''}`}
+        description="They sign in with this temporary password and must choose a new one."
+        confirmLabel="Reset password"
+        presets={['Forgot password']}
+        onConfirm={async (reason) => {
+          await api('POST', `/users/${resetting!.id}/reset-password`, { body: { temporaryPassword: pwd, reason } });
+          toast('Password reset. Tell them the temporary password.');
+        }}
+      >
+        <Field label="Temporary password" required hint={PASSWORD_HINT}>
+          {(id) => <PasswordInput id={id} initiallyVisible value={pwd} onChange={(ev) => setPwd(ev.target.value)} autoComplete="off" />}
+        </Field>
+      </ReasonDialog>
+      <ReasonDialog
+        open={!!deleting}
+        onClose={() => setDeleting(null)}
+        title={`Delete ${deleting?.fullName ?? ''}`}
+        description="The account can no longer sign in and disappears from this list. Everything it recorded stays in the history. The mobile number can be used for a new account."
+        confirmLabel="Delete user"
+        danger
+        presets={['Left the job', 'Created by mistake']}
+        onConfirm={async (reason) => {
+          await api('POST', `/users/${deleting!.id}/delete`, { body: { reason } });
+          toast('User deleted');
+          await reload();
+        }}
+      />
       <ReasonDialog
         open={!!status}
         onClose={() => setStatus(null)}

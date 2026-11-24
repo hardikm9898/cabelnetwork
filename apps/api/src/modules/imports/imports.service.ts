@@ -70,7 +70,14 @@ export class ImportsService {
       throw unprocessable('WORKBOOK_UNREADABLE', `The workbook could not be read: ${e instanceof Error ? e.message : String(e)}`);
     }
     const hash = sha256(file.buffer);
-    const committed = await this.db.selectFrom('importBatches').select('id').where('fileSha256', '=', hash).where('status', '=', 'COMMITTED').executeTakeFirst();
+    // The same file again is refused, unless every customer it brought in was deleted since.
+    const committed = await this.db
+      .selectFrom('importBatches as b')
+      .select('b.id')
+      .where('b.fileSha256', '=', hash)
+      .where('b.status', '=', 'COMMITTED')
+      .where((eb) => eb.exists(eb.selectFrom('customers as c').select('c.id').whereRef('c.importBatchId', '=', 'b.id').where('c.deletedAt', 'is', null)))
+      .executeTakeFirst();
     if (committed) throw conflict('ALREADY_IMPORTED', 'This exact workbook has already been imported');
     const batch = await this.db
       .insertInto('importBatches')
@@ -214,7 +221,7 @@ export class ImportsService {
              coalesce((SELECT sum(amount) FROM ledger_entries l WHERE l.customer_id = c.id AND l.entry_date <= ${monthEnd}::date), 0) AS balance,
              coalesce((SELECT sum(amount) FROM payments x WHERE x.customer_id = c.id AND x.status = 'CONFIRMED'
                         AND x.payment_date BETWEEN ${monthStart}::date AND ${monthEnd}::date), 0) AS collected
-      FROM customers c
+      FROM customers c WHERE c.deleted_at IS NULL
     `.execute(this.db);
     const system = new Map(sys.rows.map((r) => [r.code, { name: r.name, balance: toPaise(r.balance), collected: toPaise(r.collected) }]));
 
@@ -264,6 +271,7 @@ export class ImportsService {
       .innerJoin('societies as s', 's.id', 'c.societyId')
       .select(['c.id', 'c.customerCode', 'c.name', 's.name as society', 'c.pendingDecision'])
       .where('c.pendingDecision', 'is not', null)
+      .where('c.deletedAt', 'is', null)
       .orderBy('c.customerCode')
       .execute();
   }
@@ -480,7 +488,12 @@ export class ImportsService {
   private async validateAgainstDatabase(db: Database, eff: Effective[]): Promise<ImportIssue[]> {
     if (eff.length === 0) return [];
     const [codes, stbs] = await Promise.all([
-      db.selectFrom('customers').select('customerCode').where(sql<boolean>`lower(customer_code) = ANY(${eff.map((c) => c.code.toLowerCase())}::text[])`).execute(),
+      db
+        .selectFrom('customers')
+        .select('customerCode')
+        .where(sql<boolean>`lower(customer_code) = ANY(${eff.map((c) => c.code.toLowerCase())}::text[])`)
+        .where('deletedAt', 'is', null)
+        .execute(),
       db
         .selectFrom('customerConnections')
         .select('stbNumber')
@@ -567,7 +580,7 @@ export class ImportsService {
     const existing = await trx
       .selectFrom('societies')
       .select(['id', 'name', 'legacyName'])
-      .where(sql<boolean>`lower(name) = ANY(${names.map((n) => n.toLowerCase())}::text[]) OR lower(legacy_name) = ANY(${names.map((n) => n.toLowerCase())}::text[])`)
+      .where(sql<boolean>`(lower(name) = ANY(${names.map((n) => n.toLowerCase())}::text[]) OR lower(legacy_name) = ANY(${names.map((n) => n.toLowerCase())}::text[])) AND deleted_at IS NULL`)
       .execute();
     const societyId = new Map<string, string>();
     for (const n of names) {

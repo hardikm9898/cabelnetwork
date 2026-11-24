@@ -11,6 +11,8 @@ import {
   reason,
   ResetPasswordRequest,
   resetPasswordRequest,
+  UpdateAdminUserRequest,
+  updateAdminUserRequest,
   UpdateAgentRequest,
   updateAgentRequest,
   USER_STATUSES,
@@ -66,6 +68,14 @@ export class AgentsController {
     @ZodBody(changeUserStatusRequest) body: ChangeUserStatusRequest,
   ) {
     return this.people.changeStatus(id, body, user, ['AGENT']);
+  }
+
+  /** Agent must have no customers, areas or temporary covers left. */
+  @RequirePermissions('agents:manage')
+  @Post(':id/delete')
+  @HttpCode(200)
+  remove(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(reasonBody) body: { reason: string }) {
+    return this.people.deleteUser(id, body.reason, user, ['AGENT']);
   }
 
   @RequirePermissions('agents:manage')
@@ -128,6 +138,19 @@ export class UsersController {
   @Post()
   create(@CurrentUser() user: AuthUser, @ZodBody(createAdminUserRequest) body: CreateAdminUserRequest) {
     return this.people.createAdmin(body, user);
+  }
+
+  @RequirePermissions('users:manage')
+  @Patch(':id')
+  update(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(updateAdminUserRequest) body: UpdateAdminUserRequest) {
+    return this.people.updateAdmin(id, body, user);
+  }
+
+  @RequirePermissions('users:manage')
+  @Post(':id/delete')
+  @HttpCode(200)
+  remove(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string, @ZodBody(reasonBody) body: { reason: string }) {
+    return this.people.deleteUser(id, body.reason, user, ['ADMIN', 'SUPER_ADMIN']);
   }
 
   @RequirePermissions('users:manage')

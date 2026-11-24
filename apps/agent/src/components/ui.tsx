@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -110,15 +110,34 @@ export function Button({ title, onPress, variant = 'primary', busy, disabled, ic
 }
 
 export function Field({ label, error, hint, ...input }: TextInputProps & { label: string; error?: string | null; hint?: string }) {
+  const { t } = useApp();
+  // Password boxes get a Show / Hide button.
+  const secret = !!input.secureTextEntry;
+  const [visible, setVisible] = useState(false);
   return (
     <View style={{ gap: 6 }}>
       <Text style={{ fontSize: 14, fontWeight: '600', color: C.ink }}>{label}</Text>
-      <TextInput
-        accessibilityLabel={label}
-        placeholderTextColor="#94a3b8"
-        {...input}
-        style={[styles.input, error ? { borderColor: C.danger } : null, input.style as TextStyle]}
-      />
+      <View style={{ justifyContent: 'center' }}>
+        <TextInput
+          accessibilityLabel={label}
+          placeholderTextColor="#94a3b8"
+          autoCapitalize={secret ? 'none' : input.autoCapitalize}
+          {...input}
+          secureTextEntry={secret && !visible}
+          style={[styles.input, secret ? { paddingRight: 76 } : null, error ? { borderColor: C.danger } : null, input.style as TextStyle]}
+        />
+        {secret && (
+          <Pressable
+            onPress={() => setVisible((v) => !v)}
+            accessibilityRole="button"
+            accessibilityLabel={visible ? t('hidePassword') : t('showPassword')}
+            hitSlop={8}
+            style={{ position: 'absolute', right: 4, top: 0, bottom: 0, minWidth: 68, alignItems: 'center', justifyContent: 'center' }}
+          >
+            <Text style={{ color: C.brand, fontWeight: '700', fontSize: 15 }}>{visible ? t('hidePassword') : t('showPassword')}</Text>
+          </Pressable>
+        )}
+      </View>
       {error ? <Text style={{ color: C.danger, fontSize: 13 }}>{error}</Text> : hint ? <Text style={{ color: C.muted, fontSize: 13 }}>{hint}</Text> : null}
     </View>
   );

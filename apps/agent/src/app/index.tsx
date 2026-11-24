@@ -53,6 +53,11 @@ export default function Home() {
           ) : (
             <Card>
               <T>{online ? t('errorGeneric') : t('needsDownload')}</T>
+              {online && status.lastError ? (
+                <T muted size={13}>
+                  {status.lastError}
+                </T>
+              ) : null}
               {online && <Button title={t('retry')} variant="secondary" onPress={() => void engine.sync()} />}
             </Card>
           )

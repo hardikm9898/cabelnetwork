@@ -36,7 +36,7 @@ export class AuthService {
 
   async login(input: LoginRequest): Promise<AuthTokens & { user: PublicUser }> {
     const mobile = normalizeIndianMobile(input.mobile)?.normalized ?? input.mobile;
-    const user = await this.db.selectFrom('users').selectAll().where('mobile', '=', mobile).executeTakeFirst();
+    const user = await this.db.selectFrom('users').selectAll().where('mobile', '=', mobile).where('deletedAt', 'is', null).executeTakeFirst();
 
     if (!user) {
       await verifyAgainstDummy(input.password);
@@ -198,14 +198,13 @@ export class AuthService {
 
   async changePassword(user: AuthUser, input: ChangePasswordRequest): Promise<void> {
     const row = await this.db.selectFrom('users').select(['passwordHash', 'role', 'mobile']).where('id', '=', user.id).executeTakeFirstOrThrow();
-    // Office accounts can move money for every customer: longer passwords (ASVS 2.1.1; review L-1).
-    // Agents use a PIN-locked, device-bound app and keep the 8-character minimum.
-    if (row.role !== 'AGENT' && input.newPassword.length < 12) {
-      throw unprocessable('PASSWORD_TOO_SHORT', 'Office passwords need at least 12 characters');
-    }
+    // 6+ characters for everyone (owner's decision, 2026-11-24); guessing is limited by the
+    // lockout after 5 wrong tries and the sign-in rate limit. The own mobile number is refused,
+    // also a 6-digit piece of it.
     const lower = input.newPassword.toLowerCase();
-    if (lower.includes(row.mobile) || /(password|passw0rd|qwerty|12345678|abcdefg|cablenet|admin123)/.test(lower)) {
-      throw unprocessable('PASSWORD_TOO_COMMON', 'Choose a password that is not common and does not contain your mobile number');
+    const digits = lower.replace(/\D/g, '');
+    if (lower.includes(row.mobile) || (digits.length >= 6 && digits === lower && row.mobile.includes(digits))) {
+      throw unprocessable('PASSWORD_TOO_COMMON', 'Do not use your own mobile number as the password');
     }
     if (!(await verifyPassword(row.passwordHash, input.currentPassword))) {
       // Counts toward the lockout like a failed sign-in (review L-3).

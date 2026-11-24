@@ -33,14 +33,21 @@ export class GeographyService {
       .selectAll('ar')
       .select(['aa.agentId as ownerAgentId', 'u.fullName as ownerAgentName'])
       .select((eb) => [
-        eb.selectFrom('societies as s').select((e) => e.fn.countAll<string>().as('n')).whereRef('s.areaId', '=', 'ar.id').as('societyCount'),
+        eb
+          .selectFrom('societies as s')
+          .select((e) => e.fn.countAll<string>().as('n'))
+          .whereRef('s.areaId', '=', 'ar.id')
+          .where('s.deletedAt', 'is', null)
+          .as('societyCount'),
         eb
           .selectFrom('customers as c')
           .innerJoin('societies as s', 's.id', 'c.societyId')
           .select((e) => e.fn.countAll<string>().as('n'))
           .whereRef('s.areaId', '=', 'ar.id')
+          .where('c.deletedAt', 'is', null)
           .as('customerCount'),
       ])
+      .where('ar.deletedAt', 'is', null)
       .orderBy('ar.name')
       .execute()
       .then((rows) => rows.map((r) => ({ ...r, societyCount: Number(r.societyCount ?? 0), customerCount: Number(r.customerCount ?? 0) })));
@@ -66,7 +73,7 @@ export class GeographyService {
         .where('aa.areaId', '=', id)
         .orderBy('aa.createdAt', 'desc')
         .execute(),
-      db.selectFrom('societies').selectAll().where('areaId', '=', id).orderBy('name').execute(),
+      db.selectFrom('societies').selectAll().where('areaId', '=', id).where('deletedAt', 'is', null).orderBy('name').execute(),
     ]);
     return { ...area, currentOwner: owners.find((o) => o.isCurrent) ?? null, ownerHistory: owners, societies };
   }
@@ -112,13 +119,18 @@ export class GeographyService {
   // ---------------------------------------------------------------------------
 
   async listSocieties(filter: { areaId?: string }) {
-    let q = this.db.selectFrom('societies as s').leftJoin('areas as ar', 'ar.id', 's.areaId');
+    let q = this.db.selectFrom('societies as s').leftJoin('areas as ar', 'ar.id', 's.areaId').where('s.deletedAt', 'is', null);
     if (filter.areaId) q = q.where('s.areaId', '=', filter.areaId);
     return q
       .selectAll('s')
       .select('ar.name as areaName')
       .select((eb) =>
-        eb.selectFrom('customers as c').select((e) => e.fn.countAll<string>().as('n')).whereRef('c.societyId', '=', 's.id').as('customerCount'),
+        eb
+          .selectFrom('customers as c')
+          .select((e) => e.fn.countAll<string>().as('n'))
+          .whereRef('c.societyId', '=', 's.id')
+          .where('c.deletedAt', 'is', null)
+          .as('customerCount'),
       )
       .orderBy('s.name')
       .execute()
@@ -204,8 +216,46 @@ export class GeographyService {
     });
   }
 
+  /** Deletes an area that has no societies left (move or delete them first). Its owner is cleared. */
+  async deleteArea(id: string, reason: string, actor: AuthUser) {
+    const area = await this.db.selectFrom('areas').select(['id', 'name']).where('id', '=', id).where('deletedAt', 'is', null).executeTakeFirst();
+    if (!area) throw notFound('AREA_NOT_FOUND', 'Area not found');
+    const society = await this.db.selectFrom('societies').select('name').where('areaId', '=', id).where('deletedAt', 'is', null).executeTakeFirst();
+    if (society) throw conflict('AREA_HAS_SOCIETIES', `Area "${area.name}" still has societies (e.g. ${society.name}): move or delete them first`);
+    const owner = await this.db.selectFrom('areaAgentAssignments').select('id').where('areaId', '=', id).where(sql<boolean>`valid_during @> now()`).executeTakeFirst();
+    if (owner) await this.assignments.setAreaOwner(id, { agentId: null, reason: `Area deleted: ${reason}`, applyToManualOverrides: false }, actor.id);
+    await this.db.transaction().execute(async (trx) => {
+      await trx.updateTable('areas').set({ deletedAt: sql<Date>`now()`, deletedBy: actor.id, status: 'INACTIVE', updatedBy: actor.id }).where('id', '=', id).execute();
+      await this.audit.record(trx, { action: 'area.delete', entityType: 'area', entityId: id, before: { name: area.name }, reason });
+    });
+    return { ok: true };
+  }
+
+  /** Deletes a society that has no customers left (move or delete them first). */
+  async deleteSociety(id: string, reason: string, actor: AuthUser) {
+    return this.db.transaction().execute(async (trx) => {
+      const s = await trx.selectFrom('societies').select(['id', 'name']).where('id', '=', id).where('deletedAt', 'is', null).forUpdate().executeTakeFirst();
+      if (!s) throw notFound('SOCIETY_NOT_FOUND', 'Society not found');
+      const n = await trx
+        .selectFrom('customers')
+        .select((e) => e.fn.countAll<string>().as('n'))
+        .where('societyId', '=', id)
+        .where('deletedAt', 'is', null)
+        .executeTakeFirstOrThrow();
+      if (Number(n.n) > 0) throw conflict('SOCIETY_HAS_CUSTOMERS', `Society "${s.name}" still has ${n.n} customers: move or delete them first`);
+      await trx.updateTable('societies').set({ deletedAt: sql<Date>`now()`, deletedBy: actor.id, status: 'INACTIVE', updatedBy: actor.id }).where('id', '=', id).execute();
+      await this.audit.record(trx, { action: 'society.delete', entityType: 'society', entityId: id, before: { name: s.name }, reason });
+      return { ok: true };
+    });
+  }
+
   private async assertAreaNameFree(db: Database, name: string): Promise<void> {
-    const taken = await db.selectFrom('areas').select('id').where(sql<boolean>`lower(name) = lower(${cleanText(name)})`).executeTakeFirst();
+    const taken = await db
+      .selectFrom('areas')
+      .select('id')
+      .where(sql<boolean>`lower(name) = lower(${cleanText(name)})`)
+      .where('deletedAt', 'is', null)
+      .executeTakeFirst();
     if (taken) throw conflict('AREA_NAME_EXISTS', `Area "${name}" already exists`);
   }
 
@@ -214,6 +264,7 @@ export class GeographyService {
       .selectFrom('societies')
       .select('id')
       .where(sql<boolean>`lower(name) = lower(${cleanText(name)})`)
+      .where('deletedAt', 'is', null)
       .executeTakeFirst();
     if (taken) throw conflict('SOCIETY_NAME_EXISTS', `Society "${name}" already exists`);
   }

@@ -3,7 +3,7 @@ import { Navigate, useNavigate } from 'react-router';
 import { ClipboardList } from 'lucide-react';
 import { ApiError, api } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { Button, ErrorNote, Field, Input } from '../components/ui';
+import { Button, ErrorNote, Field, Input, PASSWORD_HINT, PasswordInput } from '../components/ui';
 
 export function LoginPage() {
   const { status, me, login } = useAuth();
@@ -45,7 +45,7 @@ export function LoginPage() {
           {(id) => <Input id={id} inputMode="tel" autoComplete="username" value={mobile} onChange={(e) => setMobile(e.target.value)} required autoFocus />}
         </Field>
         <Field label="Password">
-          {(id) => <Input id={id} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />}
+          {(id) => <PasswordInput id={id} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />}
         </Field>
         <ErrorNote error={error} />
         <Button type="submit" busy={busy} className="w-full">
@@ -88,14 +88,14 @@ export function ChangePasswordPage() {
       <form onSubmit={submit} className="w-full max-w-sm space-y-4 rounded-2xl border border-line bg-white p-6 shadow-sm">
         <div>
           <h1 className="text-lg font-semibold">Set a new password</h1>
-          <p className="text-sm text-muted">Replace your temporary password to continue. Use at least 8 characters with letters and digits.</p>
+          <p className="text-sm text-muted">Replace your temporary password to continue. {PASSWORD_HINT}.</p>
         </div>
-        <Field label="Current password">{(id) => <Input id={id} type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} required />}</Field>
+        <Field label="Current password">{(id) => <PasswordInput id={id} autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} required />}</Field>
         <Field label="New password" error={fieldErr.newPassword}>
-          {(id) => <Input id={id} type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} required />}
+          {(id) => <PasswordInput id={id} autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} required />}
         </Field>
         <Field label="Confirm new password" error={mismatch ? 'Passwords do not match' : undefined}>
-          {(id) => <Input id={id} type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required />}
+          {(id) => <PasswordInput id={id} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required />}
         </Field>
         {!(error instanceof ApiError && error.code === 'VALIDATION_FAILED') && <ErrorNote error={error} />}
         <Button type="submit" busy={busy} disabled={mismatch} className="w-full">

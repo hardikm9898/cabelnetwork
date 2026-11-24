@@ -110,26 +110,23 @@ const setup = async (kv = new MemoryKV()) => {
   return { store, server, engine, kv, setClock: (d: Date) => (clock = d) };
 };
 
-/** node:sqlite behind the same small interface as expo-sqlite. */
+/** node:sqlite behind the same small interface as expo-sqlite (one connection, like the app). */
 function nodeSqlite(): SqlDb {
   const db = new DatabaseSync(':memory:');
-  const wrap = (): SqlDb => ({
-    execAsync: async (s) => void db.exec(s),
-    runAsync: async (s, p) => db.prepare(s).run(...p),
+  // Each call yields first, as the native calls do, so concurrent writes really interleave.
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  return {
+    execAsync: async (s) => {
+      await tick();
+      db.exec(s);
+    },
+    runAsync: async (s, p) => {
+      await tick();
+      return db.prepare(s).run(...p);
+    },
     getAllAsync: async <T>(s: string, p: (string | number | null)[]) => db.prepare(s).all(...p) as T[],
     getFirstAsync: async <T>(s: string, p: (string | number | null)[]) => (db.prepare(s).get(...p) as T | undefined) ?? null,
-    withExclusiveTransactionAsync: async (task) => {
-      db.exec('BEGIN IMMEDIATE');
-      try {
-        await task(wrap());
-        db.exec('COMMIT');
-      } catch (e) {
-        db.exec('ROLLBACK');
-        throw e;
-      }
-    },
-  });
-  return wrap();
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +148,15 @@ describe('SQLite storage', () => {
     await kv.write([{ ns: 'c', key: '1', value: 'keep' }]);
     await expect(kv.write([{ ns: 'c', key: '1', value: 'new' }, { ns: 'c', key: '2', value: null as unknown as string }])).rejects.toThrow();
     expect(await kv.all('c')).toEqual([{ key: '1', value: 'keep' }]);
+  });
+
+  it("concurrent writes do not run inside another write's transaction", async () => {
+    const kv = await SqliteKV.open(nodeSqlite(), 'c'.repeat(64));
+    const many = (ns: string) => Array.from({ length: 30 }, (_, i) => ({ ns, key: String(i), value: ns + i }));
+    await Promise.all([kv.write(many('a')), kv.write([{ ns: 'b', key: '1', value: null as unknown as string }]).catch(() => 'failed'), kv.write(many('c'))]);
+    expect(await kv.all('a')).toHaveLength(30);
+    expect(await kv.all('b')).toEqual([]);
+    expect(await kv.all('c')).toHaveLength(30);
   });
 
   it('refuses a malformed key', async () => {

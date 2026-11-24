@@ -13,7 +13,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Loader2, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Eye, EyeOff, Loader2, X } from 'lucide-react';
 import { ApiError } from '../lib/api';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
@@ -71,6 +71,29 @@ export function Field({ label, error, hint, children, required }: { label: strin
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input({ className, ...p }, ref) {
   return <input ref={ref} className={cx(fieldBase, 'h-10', className)} {...p} />;
 });
+/** Password box with a show / hide button. */
+export const PasswordInput = forwardRef<HTMLInputElement, Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & { initiallyVisible?: boolean }>(function PasswordInput(
+  { className, initiallyVisible = false, ...p },
+  ref,
+) {
+  const [visible, setVisible] = useState(initiallyVisible);
+  return (
+    <div className="relative">
+      <input ref={ref} type={visible ? 'text' : 'password'} className={cx(fieldBase, 'h-10 pr-11', className)} {...p} />
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        className="absolute inset-y-0 right-0 grid w-10 place-items-center rounded-r-lg text-muted hover:text-ink"
+        aria-label={visible ? 'Hide password' : 'Show password'}
+        aria-pressed={visible}
+      >
+        {visible ? <EyeOff className="size-4" aria-hidden /> : <Eye className="size-4" aria-hidden />}
+      </button>
+    </div>
+  );
+});
+export const PASSWORD_HINT = 'At least 6 characters; a 6-digit number is fine (not 123456 or your mobile number)';
+
 export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSelectElement>>(function Select({ className, ...p }, ref) {
   return <select ref={ref} className={cx(fieldBase, 'h-10 pr-8', className)} {...p} />;
 });
@@ -305,6 +328,8 @@ export interface Column<T> {
   align?: 'right';
   sortKey?: string;
   className?: string;
+  /** Phones: shown as the card's title line (default: the first column). */
+  primary?: boolean;
 }
 
 export function DataTable<T>({
@@ -317,6 +342,8 @@ export function DataTable<T>({
   empty = 'Nothing to show',
   loading,
   footer,
+  selected,
+  onSelect,
 }: {
   columns: Column<T>[];
   rows: T[] | undefined;
@@ -327,12 +354,88 @@ export function DataTable<T>({
   empty?: ReactNode;
   loading?: boolean;
   footer?: ReactNode;
+  /** Row selection (checkboxes): keys of the selected rows. */
+  selected?: string[];
+  onSelect?: (keys: string[]) => void;
 }) {
+  const selectable = !!onSelect && !!selected;
+  const keys = rows?.map(rowKey) ?? [];
+  const allOn = selectable && keys.length > 0 && keys.every((k) => selected.includes(k));
+  const toggle = (k: string) => onSelect?.(selected?.includes(k) ? selected.filter((x) => x !== k) : [...(selected ?? []), k]);
+  const toggleAll = () => onSelect?.(allOn ? selected!.filter((k) => !keys.includes(k)) : [...new Set([...(selected ?? []), ...keys])]);
+  const box = (k: string) => (
+    <input
+      type="checkbox"
+      className="size-4 accent-brand-700"
+      checked={selected?.includes(k) ?? false}
+      onChange={() => toggle(k)}
+      onClick={(e) => e.stopPropagation()}
+      aria-label="Select row"
+    />
+  );
   return (
-    <div className="overflow-x-auto">
+    <>
+      {/* Phones: one card per row, every column as "label: value". */}
+      <div className="md:hidden">
+        {loading ? (
+          <Spinner />
+        ) : !rows || rows.length === 0 ? (
+          <Empty>{empty}</Empty>
+        ) : (
+          <>
+            {selectable && (
+              <label className="flex items-center gap-2 border-b border-line px-3 py-2 text-sm text-muted">
+                <input type="checkbox" className="size-4 accent-brand-700" checked={allOn} onChange={toggleAll} /> Select all on this page
+              </label>
+            )}
+            <ul className="divide-y divide-line">
+              {rows.map((r) => {
+                const k = rowKey(r);
+                const marked = columns.filter((c) => c.primary);
+                const heads = marked.length ? marked : columns.slice(0, 1);
+                const rest = columns.filter((c) => !heads.includes(c));
+                return (
+                  <li key={k} onClick={onRowClick ? () => onRowClick(r) : undefined} className={cx('flex gap-3 px-3 py-3', onRowClick && 'cursor-pointer active:bg-brand-50/60')}>
+                    {selectable && <div className="pt-0.5">{box(k)}</div>}
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="flex flex-wrap items-baseline gap-x-2 text-sm font-medium">
+                        {heads.map((c) => (
+                          <div key={c.key} className="min-w-0">
+                            {c.cell(r)}
+                          </div>
+                        ))}
+                      </div>
+                      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
+                        {rest.map((c) =>
+                          c.header ? (
+                            <div key={c.key} className="min-w-0">
+                              <dt className="text-[11px] text-muted">{c.header}</dt>
+                              <dd className="break-words">{c.cell(r)}</dd>
+                            </div>
+                          ) : (
+                            <div key={c.key} className="col-span-2" onClick={(e) => e.stopPropagation()}>
+                              {c.cell(r)}
+                            </div>
+                          ),
+                        )}
+                      </dl>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+      </div>
+    <div className="hidden overflow-x-auto md:block">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-line bg-slate-50/60 text-left text-xs text-muted">
+            {selectable && (
+              <th scope="col" className="w-8 px-3 py-2">
+                <input type="checkbox" className="size-4 accent-brand-700" checked={allOn} onChange={toggleAll} aria-label="Select all rows" />
+              </th>
+            )}
             {columns.map((c) => {
               const active = sort === c.sortKey || sort === `-${c.sortKey}`;
               const desc = sort === `-${c.sortKey}`;
@@ -354,13 +457,13 @@ export function DataTable<T>({
         <tbody>
           {loading ? (
             <tr>
-              <td colSpan={columns.length}>
+              <td colSpan={columns.length + (selectable ? 1 : 0)}>
                 <Spinner />
               </td>
             </tr>
           ) : !rows || rows.length === 0 ? (
             <tr>
-              <td colSpan={columns.length}>
+              <td colSpan={columns.length + (selectable ? 1 : 0)}>
                 <Empty>{empty}</Empty>
               </td>
             </tr>
@@ -369,8 +472,9 @@ export function DataTable<T>({
               <tr
                 key={rowKey(r)}
                 onClick={onRowClick ? () => onRowClick(r) : undefined}
-                className={cx('border-b border-line/70 last:border-0', onRowClick && 'cursor-pointer hover:bg-brand-50/40')}
+                className={cx('border-b border-line/70 last:border-0', onRowClick && 'cursor-pointer hover:bg-brand-50/40', selected?.includes(rowKey(r)) && 'bg-brand-50/50')}
               >
+                {selectable && <td className="px-3 py-2.5 align-top">{box(rowKey(r))}</td>}
                 {columns.map((c) => (
                   <td key={c.key} className={cx('px-3 py-2.5 align-top', c.align === 'right' && 'num text-right whitespace-nowrap', c.className)}>
                     {c.cell(r)}
@@ -383,6 +487,7 @@ export function DataTable<T>({
         {footer && <tfoot>{footer}</tfoot>}
       </table>
     </div>
+    </>
   );
 }
 

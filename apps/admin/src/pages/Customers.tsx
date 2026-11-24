@@ -1,11 +1,11 @@
 import { FormEvent, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus } from 'lucide-react';
+import { Plus, Trash2 } from 'lucide-react';
 import { ApiError, api, apiPage } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { inr, today } from '../lib/format';
-import { AgentSelect, AreaSelect, MoneyInput, SocietySelect } from '../components/shared';
+import { AgentSelect, AreaSelect, MoneyInput, ReasonDialog, SocietySelect } from '../components/shared';
 import { Badge, Button, Card, DataTable, ErrorNote, Field, FilterBar, Input, Modal, PageHeader, Pagination, Select, StatusBadge, Textarea, useDebounced, useToast } from '../components/ui';
 
 export interface CustomerListRow {
@@ -21,8 +21,20 @@ export interface CustomerListRow {
   agentName: string | null;
   assignmentKind: string | null;
   stbNumbers: string | null;
+  mqNumbers: string | null;
+  monthlyRate: string | null;
+  pendingDecision: string | null;
+  deletedAt: string | null;
   outstanding: string;
   advance: string;
+}
+
+export const DELETE_REASONS = ['Entered by mistake', 'Duplicate entry', 'Customer left / connection closed', 'Wrong import'];
+
+interface BulkResult {
+  deleted: number;
+  deletedCodes: string[];
+  blocked: { customerId: string; customerCode: string | null; reason: string }[];
 }
 
 export default function CustomersPage() {
@@ -30,6 +42,11 @@ export default function CustomersPage() {
   const navigate = useNavigate();
   const { can } = useAuth();
   const [creating, setCreating] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [bulkDelete, setBulkDelete] = useState(false);
+  const [result, setResult] = useState<BulkResult | null>(null);
+  const qc = useQueryClient();
+  const toast = useToast();
   const get = (k: string, d = '') => params.get(k) ?? d;
   const set = (k: string, v: string) => {
     const next = new URLSearchParams(params);
@@ -48,10 +65,12 @@ export default function CustomersPage() {
     agentId: get('agentId'),
     status: get('status'),
     balance: get('balance'),
+    deleted: get('deleted'),
     sort: get('sort', 'name'),
     page,
     pageSize: 25,
   };
+  const showingDeleted = filters.deleted === 'true';
   const { data, isLoading, error } = useQuery({
     queryKey: ['customers', filters],
     queryFn: () => apiPage<CustomerListRow>('/customers', filters),
@@ -61,19 +80,37 @@ export default function CustomersPage() {
   return (
     <div>
       <PageHeader
-        title="Customers"
-        subtitle={data ? `${data.meta.total} customers` : undefined}
+        title={showingDeleted ? 'Deleted customers' : 'Customers'}
+        subtitle={data ? `${data.meta.total} ${showingDeleted ? 'deleted customers (open one to restore it)' : 'customers'}` : undefined}
         actions={
-          can('customers:manage') && (
-            <Button onClick={() => setCreating(true)}>
-              <Plus className="size-4" aria-hidden /> Add customer
-            </Button>
-          )
+          <>
+            {can('customers:manage') && (
+              <Button variant="ghost" onClick={() => set('deleted', showingDeleted ? '' : 'true')}>
+                {showingDeleted ? 'Back to customers' : 'Deleted customers'}
+              </Button>
+            )}
+            {can('customers:manage') && !showingDeleted && (
+              <Button onClick={() => setCreating(true)}>
+                <Plus className="size-4" aria-hidden /> Add customer
+              </Button>
+            )}
+          </>
         }
       />
+      {selected.length > 0 && (
+        <div className="sticky top-0 z-10 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2 text-sm">
+          <span className="font-medium">{selected.length} selected</span>
+          <Button size="sm" variant="danger" onClick={() => setBulkDelete(true)}>
+            <Trash2 className="size-4" aria-hidden /> Delete selected
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelected([])}>
+            Clear selection
+          </Button>
+        </div>
+      )}
       <Card padded={false}>
         <FilterBar>
-          <div className="min-w-64 flex-1">
+          <div className="w-full min-w-0 sm:min-w-64 sm:flex-1">
             <Input
               placeholder="Search ID, name, mobile, address or STB…"
               value={q}
@@ -84,16 +121,16 @@ export default function CustomersPage() {
               aria-label="Search customers"
             />
           </div>
-          <div className="w-44">
+          <div className="w-[calc(50%-0.25rem)] sm:w-44">
             <SocietySelect value={filters.societyId} onChange={(v) => set('societyId', v)} />
           </div>
-          <div className="w-40">
+          <div className="w-[calc(50%-0.25rem)] sm:w-44">
             <AreaSelect value={filters.areaId} onChange={(v) => set('areaId', v)} />
           </div>
-          <div className="w-44">
+          <div className="w-[calc(50%-0.25rem)] sm:w-44">
             <AgentSelect value={filters.agentId} onChange={(v) => set('agentId', v)} />
           </div>
-          <div className="w-36">
+          <div className="w-[calc(50%-0.25rem)] sm:w-44">
             <Select value={filters.status} onChange={(e) => set('status', e.target.value)} aria-label="Status">
               <option value="">Any status</option>
               <option value="ACTIVE">Active</option>
@@ -102,7 +139,7 @@ export default function CustomersPage() {
               <option value="DISCONNECTED">Disconnected</option>
             </Select>
           </div>
-          <div className="w-40">
+          <div className="w-[calc(50%-0.25rem)] sm:w-44">
             <Select value={filters.balance} onChange={(e) => set('balance', e.target.value)} aria-label="Balance">
               <option value="">Any balance</option>
               <option value="OUTSTANDING">Owes money</option>
@@ -117,19 +154,30 @@ export default function CustomersPage() {
           loading={isLoading}
           rowKey={(r) => r.id}
           onRowClick={(r) => navigate(`/customers/${r.id}`)}
+          selected={can('customers:manage') && !showingDeleted ? selected : undefined}
+          onSelect={can('customers:manage') && !showingDeleted ? setSelected : undefined}
           sort={filters.sort}
           onSort={(s) => set('sort', s)}
           empty="No customers match these filters"
           columns={[
-            { key: 'code', header: 'ID', sortKey: 'code', cell: (r) => <span className="num font-medium">{r.customerCode}</span> },
+            { key: 'code', header: 'ID', sortKey: 'code', primary: true, cell: (r) => <span className="num font-medium">{r.customerCode}</span> },
             {
               key: 'name',
               header: 'Name',
               sortKey: 'name',
+              primary: true,
               cell: (r) => (
                 <div>
-                  <div className="font-medium">{r.name}</div>
+                  <div className="font-medium">
+                    {r.name} {r.pendingDecision && <Badge tone="warn">rate to decide</Badge>}
+                  </div>
                   <div className="text-xs text-muted">{r.addressLine}</div>
+                  {(r.stbNumbers || r.mqNumbers) && (
+                    <div className="num text-xs text-muted">
+                      {r.stbNumbers && `STB ${r.stbNumbers}`}
+                      {r.mqNumbers && ` · MQ ${r.mqNumbers}`}
+                    </div>
+                  )}
                 </div>
               ),
             },
@@ -144,7 +192,8 @@ export default function CustomersPage() {
               header: 'Agent',
               cell: (r) => (r.agentName ? <span>{r.agentName}{r.assignmentKind === 'TEMPORARY' && <Badge tone="info">temp</Badge>}</span> : <span className="text-muted">Unassigned</span>),
             },
-            { key: 'status', header: 'Status', cell: (r) => <StatusBadge status={r.status} /> },
+            { key: 'rate', header: 'Monthly', align: 'right', cell: (r) => (r.monthlyRate ? inr(r.monthlyRate) : <span className="text-muted">not billed</span>) },
+            { key: 'status', header: 'Status', cell: (r) => (r.deletedAt ? <Badge tone="bad">deleted</Badge> : <StatusBadge status={r.status} />) },
             {
               key: 'balance',
               header: 'Balance',
@@ -164,6 +213,38 @@ export default function CustomersPage() {
         {data && <Pagination page={page} pageSize={25} total={data.meta.total} onPage={(p) => set('page', String(p))} />}
       </Card>
       <CustomerFormModal open={creating} onClose={() => setCreating(false)} onSaved={(id) => navigate(`/customers/${id}`)} />
+      <ReasonDialog
+        open={bulkDelete}
+        onClose={() => setBulkDelete(false)}
+        title={`Delete ${selected.length} customer${selected.length === 1 ? '' : 's'}`}
+        description="Deleted customers disappear from the lists, the agents' phones and billing. Their payment history stays, and they can be restored from 'Deleted customers'. Customers who still owe money or have an advance are not deleted."
+        confirmLabel="Delete"
+        danger
+        presets={DELETE_REASONS}
+        onConfirm={async (reason) => {
+          const res = await api<BulkResult>('POST', '/customers/bulk-delete', { body: { customerIds: selected, reason } });
+          setSelected([]);
+          await qc.invalidateQueries({ queryKey: ['customers'] });
+          if (res.blocked.length) setResult(res);
+          else toast(`${res.deleted} customer${res.deleted === 1 ? '' : 's'} deleted`);
+        }}
+      />
+      <Modal open={!!result} onClose={() => setResult(null)} title="Delete result" footer={<Button onClick={() => setResult(null)}>OK</Button>}>
+        {result && (
+          <div className="space-y-3 text-sm">
+            <p>
+              <strong>{result.deleted}</strong> deleted. <strong>{result.blocked.length}</strong> could not be deleted:
+            </p>
+            <ul className="space-y-1">
+              {result.blocked.map((b) => (
+                <li key={b.customerId} className="rounded-lg bg-amber-50 px-3 py-2 text-amber-900">
+                  {b.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
