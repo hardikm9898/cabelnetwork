@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileDown } from 'lucide-react';
+import { FileDown, Trash2 } from 'lucide-react';
 import { api, apiPage } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { date, inr, label, monthStart, today } from '../lib/format';
 import { AgentSelect, ReasonDialog } from '../components/shared';
 import { ActionDialog } from '../components/ActionDialog';
-import { Badge, Button, Card, DataTable, Field, FilterBar, Input, PageHeader, Pagination, Select, StatusBadge, Tabs, Textarea, useToast } from '../components/ui';
-import { openReceipt, PaymentStatus } from './CustomerDetail';
+import { Badge, Button, Card, DataTable, Field, FilterBar, Input, Modal, PageHeader, Pagination, Select, StatusBadge, Tabs, Textarea, useToast } from '../components/ui';
+import { openReceipt, PAYMENT_DELETE_HELP, PAYMENT_DELETE_REASONS, PaymentStatus } from './CustomerDetail';
 
 interface Row {
   id: string;
@@ -54,14 +54,35 @@ function AllPayments() {
   const [f, setF] = useState({ from: monthStart(), to: today(), collectedBy: '', mode: '', status: 'CONFIRMED' });
   const [page, setPage] = useState(1);
   const [reverse, setReverse] = useState<Row | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [bulk, setBulk] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{ deleted: number; failed: string[] } | null>(null);
   const q = { ...f, page, pageSize: 25 };
   const { data, isLoading } = useQuery({ queryKey: ['payments', q], queryFn: () => apiPage<Row>('/payments', q) });
   const up = (k: keyof typeof f, v: string) => {
     setF((s) => ({ ...s, [k]: v }));
     setPage(1);
+    setSelected([]);
   };
+  const canDelete = can('payments:reverse');
+  const chosen = (data?.items ?? []).filter((r) => selected.includes(r.id));
+  const deletable = chosen.filter((r) => r.status === 'CONFIRMED');
   return (
     <Card padded={false}>
+      {selected.length > 0 && (
+        <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-brand-200 bg-brand-50 px-4 py-2 text-sm">
+          <span className="font-medium">
+            {selected.length} selected · {inr(deletable.reduce((s, r) => s + Number(r.amount), 0).toFixed(2))}
+          </span>
+          <Button size="sm" variant="danger" disabled={deletable.length === 0} onClick={() => setBulk(true)}>
+            <Trash2 className="size-4" aria-hidden /> Delete selected
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelected([])}>
+            Clear selection
+          </Button>
+          {deletable.length < chosen.length && <span className="text-xs text-muted">Only confirmed payments can be deleted; the others are skipped.</span>}
+        </div>
+      )}
       <FilterBar>
         <Field label="From">{(id) => <Input id={id} type="date" value={f.from} onChange={(e) => up('from', e.target.value)} />}</Field>
         <Field label="To">{(id) => <Input id={id} type="date" value={f.to} onChange={(e) => up('to', e.target.value)} />}</Field>
@@ -90,6 +111,8 @@ function AllPayments() {
         rows={data?.items}
         loading={isLoading}
         rowKey={(r) => r.id}
+        selected={canDelete ? selected : undefined}
+        onSelect={canDelete ? setSelected : undefined}
         empty="No payments"
         columns={[
           { key: 'd', header: 'Date', cell: (r) => date(r.paymentDate) },
@@ -118,8 +141,10 @@ function AllPayments() {
                     <FileDown className="size-4" />
                   </Button>
                 )}
-                {can('payments:reverse') && r.status === 'CONFIRMED' && (
-                  <Button size="sm" variant="ghost" onClick={() => setReverse(r)}>Reverse</Button>
+                {canDelete && r.status === 'CONFIRMED' && (
+                  <Button size="sm" variant="ghost" className="text-red-700" onClick={() => setReverse(r)}>
+                    <Trash2 className="size-4" aria-hidden /> Delete
+                  </Button>
                 )}
               </div>
             ),
@@ -130,16 +155,57 @@ function AllPayments() {
       <ReasonDialog
         open={!!reverse}
         onClose={() => setReverse(null)}
-        title={`Reverse ${reverse ? inr(reverse.amount) : ''} from ${reverse?.customerName ?? ''}`}
+        title={`Delete ${reverse ? inr(reverse.amount) : ''} payment of ${reverse?.customerName ?? ''}`}
         danger
-        confirmLabel="Reverse payment"
-        description="The payment stays in history, its receipt is cancelled, and the bills it paid reopen."
+        confirmLabel="Delete payment"
+        presets={PAYMENT_DELETE_REASONS}
+        description={PAYMENT_DELETE_HELP}
         onConfirm={async (reason, key) => {
           await api('POST', `/payments/${reverse!.id}/reverse`, { body: { reason }, idempotencyKey: key });
-          toast('Payment reversed');
+          toast('Payment deleted');
           await qc.invalidateQueries();
         }}
       />
+      <ReasonDialog
+        open={bulk}
+        onClose={() => setBulk(false)}
+        title={`Delete ${deletable.length} payment${deletable.length === 1 ? '' : 's'} (${inr(deletable.reduce((s, r) => s + Number(r.amount), 0).toFixed(2))})`}
+        danger
+        confirmLabel="Delete payments"
+        presets={PAYMENT_DELETE_REASONS}
+        description={PAYMENT_DELETE_HELP}
+        onConfirm={async (reason) => {
+          const failed: string[] = [];
+          for (const r of deletable) {
+            try {
+              await api('POST', `/payments/${r.id}/reverse`, { body: { reason }, idempotencyKey: crypto.randomUUID() });
+            } catch (e) {
+              failed.push(`${r.customerName} ${inr(r.amount)}: ${e instanceof Error ? e.message : 'failed'}`);
+            }
+          }
+          setSelected([]);
+          await qc.invalidateQueries();
+          const done = deletable.length - failed.length;
+          if (failed.length) setBulkResult({ deleted: done, failed });
+          else toast(`${done} payment${done === 1 ? '' : 's'} deleted`);
+        }}
+      />
+      <Modal open={!!bulkResult} onClose={() => setBulkResult(null)} title="Delete result" footer={<Button onClick={() => setBulkResult(null)}>OK</Button>}>
+        {bulkResult && (
+          <div className="space-y-3 text-sm">
+            <p>
+              <strong>{bulkResult.deleted}</strong> deleted. <strong>{bulkResult.failed.length}</strong> could not be deleted:
+            </p>
+            <ul className="space-y-1">
+              {bulkResult.failed.map((f) => (
+                <li key={f} className="rounded-lg bg-amber-50 px-3 py-2 text-amber-900">
+                  {f}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </Modal>
     </Card>
   );
 }

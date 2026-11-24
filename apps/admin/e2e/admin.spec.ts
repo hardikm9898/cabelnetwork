@@ -96,13 +96,35 @@ test.describe.serial('admin web', () => {
     await page.goto(customerUrl);
     await expect(page.getByTestId('customer-balance')).toContainText('Settled');
     await page.getByRole('tab', { name: 'Payments' }).click();
-    await page.getByRole('button', { name: 'Reverse' }).click();
-    const dialog = page.getByRole('dialog', { name: /Reverse/ });
-    await dialog.getByLabel('Reason').fill('Entered for the wrong customer');
-    await dialog.getByRole('button', { name: 'Reverse payment' }).click();
-    await expect(page.getByText('Payment reversed')).toBeVisible();
+    await page.getByRole('button', { name: 'Delete', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: /Delete/ });
+    await dialog.getByRole('button', { name: 'Test entry' }).click();
+    await dialog.getByRole('button', { name: 'Delete payment' }).click();
+    await expect(page.getByText('Payment deleted')).toBeVisible();
     await expect(page.getByTestId('customer-balance')).toContainText('₹900.00');
-    await expect(page.locator('tbody')).toContainText('reversed');
+    await expect(page.locator('tbody')).toContainText('deleted');
+    await expect(page.locator('tbody')).toContainText('Test entry');
+
+    // Several at once from the Payments page: two test entries made at the office.
+    const customerId = customerUrl.split('/').pop()!;
+    const login = await fetch(`${state.apiBase}/api/v1/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mobile: state.adminMobile, password: state.adminPassword }) });
+    const token = ((await login.json()) as { data: { accessToken: string } }).data.accessToken;
+    for (const amount of ['111', '222']) {
+      const r = await fetch(`${state.apiBase}/api/v1/payments`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
+        body: JSON.stringify({ clientTxnId: crypto.randomUUID(), customerId, amount, paymentDate: new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10), mode: 'CASH' }),
+      });
+      expect(r.status).toBe(201);
+    }
+    await nav(page, 'Payments');
+    for (const amount of ['₹111.00', '₹222.00']) await page.getByRole('row').filter({ hasText: amount }).locator('input[type=checkbox]').check();
+    await page.getByRole('button', { name: 'Delete selected' }).click();
+    const bulk = page.getByRole('dialog', { name: /Delete 2 payments/ });
+    await bulk.getByRole('button', { name: 'Test entry' }).click();
+    await bulk.getByRole('button', { name: 'Delete payments' }).click();
+    await expect(page.getByText('2 payments deleted')).toBeVisible();
+    await expect(page.getByRole('row').filter({ hasText: '₹111.00' })).toHaveCount(0);
   });
 
   test('dashboard totals equal the database ground truth', async ({ page }) => {

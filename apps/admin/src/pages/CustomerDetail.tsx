@@ -1,7 +1,7 @@
 import { ReactNode, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarPlus, FileDown, MoreHorizontal, Phone, ReceiptIndianRupee } from 'lucide-react';
+import { CalendarPlus, FileDown, MoreHorizontal, Phone, ReceiptIndianRupee, Trash2 } from 'lucide-react';
 import { api, apiPage, download } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { date, dateTime, inr, label, today } from '../lib/format';
@@ -605,11 +605,15 @@ interface PaymentRow {
   deletedByAgent: boolean;
 }
 
-/** Status of a payment, with "Deleted by agent" and the reason for a reversed / failed one. */
+/** One-tap reasons for deleting a payment. */
+export const PAYMENT_DELETE_REASONS = ['Test entry', 'Entered twice', 'Wrong customer', 'Wrong amount', 'Customer did not pay'];
+export const PAYMENT_DELETE_HELP = 'The payment is removed from collections and totals, its receipt is cancelled, and the amount becomes due again. It stays in the history marked deleted, with the reason (nothing disappears from the books).';
+
+/** Status of a payment, with "deleted" / "deleted by agent" and the reason. */
 export function PaymentStatus({ status, deletedByAgent, note }: { status: string; deletedByAgent?: boolean; note?: string | null }) {
   return (
     <span className="flex flex-col items-start gap-0.5">
-      {deletedByAgent ? <Badge tone="bad">deleted by agent</Badge> : <StatusBadge status={status} />}
+      {deletedByAgent ? <Badge tone="bad">deleted by agent</Badge> : status === 'REVERSED' ? <Badge tone="bad">deleted</Badge> : <StatusBadge status={status} />}
       {note && <span className="max-w-64 text-xs text-muted">{note.replace(/^Deleted by agent: /, '')}</span>}
     </span>
   );
@@ -651,8 +655,8 @@ function PaymentsTab({ customerId, onChanged }: { customerId: string; onChanged:
                   </Button>
                 )}
                 {can('payments:reverse') && r.status === 'CONFIRMED' && (
-                  <Button size="sm" variant="ghost" onClick={() => setReverse(r)}>
-                    Reverse
+                  <Button size="sm" variant="ghost" className="text-red-700" onClick={() => setReverse(r)}>
+                    <Trash2 className="size-4" aria-hidden /> Delete
                   </Button>
                 )}
               </div>
@@ -664,13 +668,14 @@ function PaymentsTab({ customerId, onChanged }: { customerId: string; onChanged:
       <ReasonDialog
         open={!!reverse}
         onClose={() => setReverse(null)}
-        title={`Reverse ${reverse ? inr(reverse.amount) : ''} payment`}
+        title={`Delete ${reverse ? inr(reverse.amount) : ''} payment of ${reverse ? date(reverse.paymentDate) : ''}`}
         danger
-        confirmLabel="Reverse payment"
-        description="Use this for a wrong entry. The payment stays in history, its receipt is cancelled, and the bills it paid reopen. Enter the correct payment separately."
+        confirmLabel="Delete payment"
+        presets={PAYMENT_DELETE_REASONS}
+        description={PAYMENT_DELETE_HELP}
         onConfirm={async (reason, key) => {
           await api('POST', `/payments/${reverse!.id}/reverse`, { body: { reason }, idempotencyKey: key });
-          toast('Payment reversed');
+          toast('Payment deleted');
           onChanged();
         }}
       />
